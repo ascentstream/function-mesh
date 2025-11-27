@@ -24,11 +24,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/streamnative/function-mesh/pkg/monitoring"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/streamnative/function-mesh/pkg/monitoring"
 
 	"github.com/go-logr/logr"
 	computev1alpha1 "github.com/streamnative/function-mesh/api/compute/v1alpha1"
@@ -46,7 +44,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	runtimeWebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -75,12 +72,7 @@ func main() {
 	var configFile string
 	var watchedNamespace string
 	var enableInitContainers bool
-	var globalBackendConfig string
-	var globalBackendConfigNamespace string
-	var namespacedBackendConfig string
-	var secureMetrics bool
-	var addDefaultAffinity bool
-	flag.StringVar(&metricsAddr, "metrics-addr", lookupEnvOrString("METRICS_ADDR", ":8443"),
+	flag.StringVar(&metricsAddr, "metrics-addr", lookupEnvOrString("METRICS_ADDR", ":8080"),
 		"The address the metric endpoint binds to.")
 	flag.StringVar(&leaderElectionID, "leader-election-id",
 		lookupEnvOrString("LEADER_ELECTION_ID", "a3f45fce.functionmesh.io"),
@@ -105,24 +97,10 @@ func main() {
 		"The address the pprof binds to.")
 	flag.BoolVar(&enableInitContainers, "enable-init-containers", lookupEnvOrBool("ENABLE_INIT_CONTAINERS", false),
 		"Whether to use an init container to download package")
-	flag.StringVar(&globalBackendConfig, "global-backend-config", lookupEnvOrString("GLOBAL_BACKEND_CONFIG", ""),
-		"The global backend config name used for all functions&sinks&sources")
-	flag.StringVar(&globalBackendConfigNamespace, "global-backend-config-namespace", lookupEnvOrString("GLOBAL_BACKEND_CONFIG_NAMESPACE", "default"),
-		"The namespace of the global backend config name used for all functions&sinks&sources")
-	flag.StringVar(&namespacedBackendConfig, "namespaced-backend-config", lookupEnvOrString("NAMESPACED_BACKEND_CONFIG", "backend-config"),
-		"The backend config name used for functions&sinks&sources in the same namespace")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true, "If set, the metrics endpoint is served securely via HTTPS."+
-		" Use --metrics-secure=false to use HTTP instead.")
-	flag.BoolVar(&addDefaultAffinity, "add-default-affinity", lookupEnvOrBool("ADD_DEFAULT_AFFINITY", true), "If set, the generated pod will add one default podAntiAffinity:"+
-		" make pods prefer not be scheduled on the same node (soft rule).")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	utils.EnableInitContainers = enableInitContainers
-	utils.GlobalBackendConfig = globalBackendConfig
-	utils.GlobalBackendConfigNamespace = globalBackendConfigNamespace
-	utils.NamespacedBackendConfig = namespacedBackendConfig
-	utils.AddDefaultAffinity = addDefaultAffinity
 
 	// enable pprof
 	if enablePprof {
@@ -141,39 +119,17 @@ func main() {
 		}
 	}
 
-	metricOpts := server.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
-	}
-
-	if secureMetrics {
-		metricOpts.FilterProvider = filters.WithAuthenticationAndAuthorization
-	}
-
-	options := ctrl.Options{
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                  scheme,
-		Metrics:                 metricOpts,
+		MetricsBindAddress:      metricsAddr,
 		HealthProbeBindAddress:  healthProbeAddr,
+		Port:                    9443,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        leaderElectionID,
-	}
-	if watchedNamespace != "" {
-		options.Cache = cache.Options{
-			DefaultNamespaces: map[string]cache.Config{
-				watchedNamespace: {},
-			},
-		}
-	}
-	if certDir != "" {
-		options.WebhookServer = &runtimeWebhook.DefaultServer{
-			Options: runtimeWebhook.Options{
-				Port:    9443,
-				CertDir: certDir,
-			},
-		}
-	}
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), options)
+		Namespace:               watchedNamespace,
+		CertDir:                 certDir,
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)

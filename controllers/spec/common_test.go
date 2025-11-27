@@ -136,11 +136,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		// test get the download command with a tls config
 		{"function://public/default/test@v1", "function-package.jar",
 			&v1alpha1.PulsarTLSConfig{
-				Enabled:              true,
-				AllowInsecure:        false,
-				HostnameVerification: true,
-				CertSecretName:       "test-secret",
-				CertSecretKey:        "test-key",
+				TLSConfig: v1alpha1.TLSConfig{
+					Enabled:              true,
+					AllowInsecure:        false,
+					HostnameVerification: true,
+					CertSecretName:       "test-secret",
+					CertSecretKey:        "test-key",
+				},
 			}, nil, nil,
 			[]string{
 				"export PATH=$PATH:/pulsar/bin && ",
@@ -155,11 +157,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		},
 		{"function://public/default/test@v1", "function-package.jar",
 			&v1alpha1.PulsarTLSConfig{
-				Enabled:              false,
-				AllowInsecure:        false,
-				HostnameVerification: true,
-				CertSecretName:       "test-secret",
-				CertSecretKey:        "test-key",
+				TLSConfig: v1alpha1.TLSConfig{
+					Enabled:              false,
+					AllowInsecure:        false,
+					HostnameVerification: true,
+					CertSecretName:       "test-secret",
+					CertSecretKey:        "test-key",
+				},
 			}, nil, nil,
 			[]string{
 				"export PATH=$PATH:/pulsar/bin && ",
@@ -171,11 +175,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		},
 		{"function://public/default/test@v1", "function-package.jar",
 			&v1alpha1.PulsarTLSConfig{
-				Enabled:              true,
-				AllowInsecure:        true,
-				HostnameVerification: false,
-				CertSecretName:       "test-secret",
-				CertSecretKey:        "test-key",
+				TLSConfig: v1alpha1.TLSConfig{
+					Enabled:              true,
+					AllowInsecure:        true,
+					HostnameVerification: false,
+					CertSecretName:       "test-secret",
+					CertSecretKey:        "test-key",
+				},
 			}, nil, nil,
 			[]string{
 				"export PATH=$PATH:/pulsar/bin && ",
@@ -190,11 +196,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		},
 		{"function://public/default/test@v1", "function-package.jar",
 			&v1alpha1.PulsarTLSConfig{
-				Enabled:              true,
-				AllowInsecure:        true,
-				HostnameVerification: false,
-				CertSecretName:       "test-secret",
-				CertSecretKey:        "test-key",
+				TLSConfig: v1alpha1.TLSConfig{
+					Enabled:              true,
+					AllowInsecure:        true,
+					HostnameVerification: false,
+					CertSecretName:       "test-secret",
+					CertSecretKey:        "test-key",
+				},
 			}, nil, &v1alpha1.GenericAuth{
 				ClientAuthenticationParameters: "auth-params",
 				ClientAuthenticationPlugin:     "auth-plugin",
@@ -220,11 +228,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		},
 		{"http://aaa.bbb.ccc/test.jar", "function-package.jar",
 			&v1alpha1.PulsarTLSConfig{
-				Enabled:              true,
-				AllowInsecure:        true,
-				HostnameVerification: false,
-				CertSecretName:       "test-secret",
-				CertSecretKey:        "test-key",
+				TLSConfig: v1alpha1.TLSConfig{
+					Enabled:              true,
+					AllowInsecure:        true,
+					HostnameVerification: false,
+					CertSecretName:       "test-secret",
+					CertSecretKey:        "test-key",
+				},
 			}, nil, nil,
 			[]string{
 				"wget",
@@ -258,11 +268,13 @@ func TestGetDownloadCommand(t *testing.T) {
 			false,
 		},
 		{"source://public/default/test@v1", "source-package.jar", &v1alpha1.PulsarTLSConfig{
-			Enabled:              true,
-			AllowInsecure:        false,
-			HostnameVerification: true,
-			CertSecretName:       "test-secret",
-			CertSecretKey:        "test-key",
+			TLSConfig: v1alpha1.TLSConfig{
+				Enabled:              true,
+				AllowInsecure:        false,
+				HostnameVerification: true,
+				CertSecretName:       "test-secret",
+				CertSecretKey:        "test-key",
+			},
 		}, nil, nil,
 			[]string{
 				PulsarAdminExecutableFile,
@@ -275,11 +287,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		},
 		// test get the download command with normal name
 		{"/test", "test.jar", &v1alpha1.PulsarTLSConfig{
-			Enabled:              true,
-			AllowInsecure:        true,
-			HostnameVerification: true,
-			CertSecretName:       "test-secret",
-			CertSecretKey:        "test-key",
+			TLSConfig: v1alpha1.TLSConfig{
+				Enabled:              true,
+				AllowInsecure:        true,
+				HostnameVerification: true,
+				CertSecretName:       "test-secret",
+				CertSecretKey:        "test-key",
+			},
 		}, nil, nil,
 			[]string{
 				PulsarAdminExecutableFile,
@@ -292,11 +306,13 @@ func TestGetDownloadCommand(t *testing.T) {
 		},
 		// test get the download command with a wrong package name
 		{"source/public/default/test@v1", "source-package.jar", &v1alpha1.PulsarTLSConfig{
-			Enabled:              true,
-			AllowInsecure:        true,
-			HostnameVerification: false,
-			CertSecretName:       "test-secret",
-			CertSecretKey:        "test-key",
+			TLSConfig: v1alpha1.TLSConfig{
+				Enabled:              true,
+				AllowInsecure:        true,
+				HostnameVerification: false,
+				CertSecretName:       "test-secret",
+				CertSecretKey:        "test-key",
+			},
 		}, nil, nil,
 			[]string{
 				PulsarAdminExecutableFile,
@@ -308,11 +324,13 @@ func TestGetDownloadCommand(t *testing.T) {
 			false,
 		},
 		{"source:/public/default/test@v1", "source-package.jar", &v1alpha1.PulsarTLSConfig{
-			Enabled:              false,
-			AllowInsecure:        true,
-			HostnameVerification: false,
-			CertSecretName:       "test-secret",
-			CertSecretKey:        "test-key",
+			TLSConfig: v1alpha1.TLSConfig{
+				Enabled:              false,
+				AllowInsecure:        true,
+				HostnameVerification: false,
+				CertSecretName:       "test-secret",
+				CertSecretKey:        "test-key",
+			},
 		}, nil, nil,
 			[]string{
 				PulsarAdminExecutableFile,
@@ -330,7 +348,7 @@ func TestGetDownloadCommand(t *testing.T) {
 		} else if v.genericAuth != nil {
 			authConfig.GenericAuth = v.genericAuth
 		}
-		actualResult := GetDownloadCommand(v.downloadPath, v.componentPackage, v.hasPulsarctl, v.hasPulsarctl, false, false, v.tlsConfig, &authConfig)
+		actualResult := getDownloadCommand(v.downloadPath, v.componentPackage, v.hasPulsarctl, v.hasPulsarctl, false, false, v.tlsConfig, &authConfig)
 		assert.Equal(t, v.expectedCommand, actualResult)
 	}
 }
@@ -421,7 +439,7 @@ func TestGetSourceRunnerImage(t *testing.T) {
 func TestMakeGoFunctionCommand(t *testing.T) {
 	function := makeGoFunctionSample(TestFunctionName)
 	commands := MakeGoFunctionCommand("", "/pulsar/go-func", function)
-	assert.Equal(t, commands[0], "bash")
+	assert.Equal(t, commands[0], "sh")
 	assert.Equal(t, commands[1], "-c")
 	assert.True(t, strings.HasPrefix(commands[2], "SHARD_ID=${POD_NAME##*-} && echo shardId=${SHARD_ID}"))
 	innerCommands := strings.Split(commands[2], "&&")
@@ -623,11 +641,13 @@ func TestGeneratePodVolumes(t *testing.T) {
 					},
 				},
 				trustCert: &v1alpha1.PulsarTLSConfig{
-					Enabled:              true,
-					AllowInsecure:        true,
-					HostnameVerification: true,
-					CertSecretName:       "test-trust-secret",
-					CertSecretKey:        "test-trust-key",
+					TLSConfig: v1alpha1.TLSConfig{
+						Enabled:              true,
+						AllowInsecure:        true,
+						HostnameVerification: true,
+						CertSecretName:       "test-trust-secret",
+						CertSecretKey:        "test-trust-key",
+					},
 				},
 			},
 			want: []corev1.Volume{
@@ -815,7 +835,7 @@ func TestGeneratePodVolumes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equalf(t, tt.want,
-				GeneratePodVolumes(
+				generatePodVolumes(
 					tt.args.podVolumes,
 					tt.args.producerConf,
 					tt.args.consumerConfs,
@@ -823,7 +843,7 @@ func TestGeneratePodVolumes(t *testing.T) {
 					tt.args.authConfig,
 					tt.args.logConf,
 					v1alpha1.RUNTIME,
-				), "GeneratePodVolumes(%v, %v, %v, %v)", tt.args.podVolumes, tt.args.producerConf, tt.args.consumerConfs, tt.args.trustCert)
+				), "generatePodVolumes(%v, %v, %v, %v)", tt.args.podVolumes, tt.args.producerConf, tt.args.consumerConfs, tt.args.trustCert)
 		})
 	}
 }
@@ -937,11 +957,13 @@ func TestGenerateContainerVolumeMounts(t *testing.T) {
 					},
 				},
 				trustCert: &v1alpha1.PulsarTLSConfig{
-					Enabled:              true,
-					AllowInsecure:        true,
-					HostnameVerification: true,
-					CertSecretName:       "test-trust-secret",
-					CertSecretKey:        "test-trust-key",
+					TLSConfig: v1alpha1.TLSConfig{
+						Enabled:              true,
+						AllowInsecure:        true,
+						HostnameVerification: true,
+						CertSecretName:       "test-trust-secret",
+						CertSecretKey:        "test-trust-key",
+					},
 				},
 			},
 			want: []corev1.VolumeMount{
@@ -983,11 +1005,13 @@ func TestGenerateContainerVolumeMounts(t *testing.T) {
 					},
 				},
 				trustCert: &v1alpha1.PulsarTLSConfig{
-					Enabled:              true,
-					AllowInsecure:        true,
-					HostnameVerification: true,
-					CertSecretName:       "test-trust-secret",
-					CertSecretKey:        "test-trust-key",
+					TLSConfig: v1alpha1.TLSConfig{
+						Enabled:              true,
+						AllowInsecure:        true,
+						HostnameVerification: true,
+						CertSecretName:       "test-trust-secret",
+						CertSecretKey:        "test-trust-key",
+					},
 				},
 				javaRuntime: &v1alpha1.JavaRuntime{
 					Jar:         "test.jar",
@@ -1091,226 +1115,14 @@ func TestGenerateContainerVolumeMounts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equalf(t, tt.want,
-				GenerateContainerVolumeMounts(
+				generateContainerVolumeMounts(
 					tt.args.volumeMounts,
 					tt.args.producerConf,
 					tt.args.consumerConfs,
 					tt.args.trustCert,
 					tt.args.authConfig,
 					tt.args.logConf,
-					v1alpha1.RUNTIME), "GenerateContainerVolumeMounts(%v, %v, %v, %v)", tt.args.volumeMounts, tt.args.producerConf, tt.args.consumerConfs, tt.args.trustCert)
+					v1alpha1.RUNTIME), "generateContainerVolumeMounts(%v, %v, %v, %v)", tt.args.volumeMounts, tt.args.producerConf, tt.args.consumerConfs, tt.args.trustCert)
 		})
-	}
-}
-
-func TestRenderINI_Default_Text_NoRolling(t *testing.T) {
-	textFormat := v1alpha1.TEXT
-	rt := &v1alpha1.PythonRuntime{
-		Log: &v1alpha1.RuntimeLogConfig{
-			Level:  "INFO",
-			Format: &textFormat,
-			// RotatePolicy: nil
-		},
-	}
-	got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.RUNTIME)
-	if err != nil {
-		t.Fatalf("render error: %v", err)
-	}
-
-	// handlers
-	if !strings.Contains(got, "[handlers]\nkeys=stream_handler") {
-		t.Fatalf("handlers keys invalid:\n%s", got)
-	}
-	// only stream handler should exist (no rotating/timed section)
-	if strings.Contains(got, "[handler_rotating_file_handler]") || strings.Contains(got, "[handler_timed_rotating_file_handler]") {
-		t.Fatalf("unexpected rolling sections:\n%s", got)
-	}
-
-	// stream handler basics
-	if !strings.Contains(got, "[handler_stream_handler]") ||
-		!strings.Contains(got, "class=logging.StreamHandler") ||
-		!strings.Contains(got, "formatter=formatter") {
-		t.Fatalf("stream handler invalid:\n%s", got)
-	}
-
-	// formatter (text)
-	if !strings.Contains(got, "[formatter_formatter]") ||
-		!strings.Contains(got, "format=[%(asctime)s] [%(levelname)s] %(filename)s:%(lineno)d %(message)s") {
-		t.Fatalf("text formatter invalid:\n%s", got)
-	}
-}
-
-func TestRenderINI_JSON_NoRolling(t *testing.T) {
-	jsonFormat := v1alpha1.JSON
-	rt := &v1alpha1.PythonRuntime{
-		Log: &v1alpha1.RuntimeLogConfig{
-			Level:  "DEBUG",
-			Format: &jsonFormat,
-		},
-	}
-	got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.RUNTIME)
-	if err != nil {
-		t.Fatalf("render error: %v", err)
-	}
-
-	// handlers
-	if !strings.Contains(got, "[handlers]\nkeys=stream_handler") {
-		t.Fatalf("handlers keys invalid:\n%s", got)
-	}
-
-	// formatter (json)
-	if !strings.Contains(got, "[formatter_formatter]") ||
-		!strings.Contains(got, "class=pythonjsonlogger.jsonlogger.JsonFormatter") ||
-		!strings.Contains(got, "format=%(message)s") {
-		t.Fatalf("json formatter invalid:\n%s", got)
-	}
-}
-
-func TestRenderINI_SizeRolling_10MB(t *testing.T) {
-	textFormat := v1alpha1.TEXT
-	rotatePolicy := v1alpha1.SizedPolicyWith10MB
-	rt := &v1alpha1.PythonRuntime{
-		Log: &v1alpha1.RuntimeLogConfig{
-			Level:        "INFO",
-			Format:       &textFormat,
-			RotatePolicy: &rotatePolicy,
-		},
-	}
-	got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.RUNTIME)
-	if err != nil {
-		t.Fatalf("render error: %v", err)
-	}
-
-	if !strings.Contains(got, "[handlers]\nkeys=stream_handler,rotating_file_handler") {
-		t.Fatalf("handlers keys invalid for size rolling:\n%s", got)
-	}
-	if !strings.Contains(got, "[handler_rotating_file_handler]") ||
-		!strings.Contains(got, "class=logging.handlers.RotatingFileHandler") ||
-		!strings.Contains(got, "formatter=formatter") {
-		t.Fatalf("rotating handler invalid:\n%s", got)
-	}
-	// args: ('logs/functions/demo.log', 'a', 10485760, 5)
-	if !strings.Contains(got, "args=('logs/functions/demo.log', 'a', 10485760, 5)") {
-		t.Fatalf("rotating handler args invalid:\n%s", got)
-	}
-}
-
-func TestRenderINI_SizeRolling_50MB_100MB(t *testing.T) {
-	tests := []struct {
-		policy v1alpha1.TriggeringPolicy
-		size   string // as string to match directly
-	}{
-		{v1alpha1.SizedPolicyWith50MB, "52428800"},
-		{v1alpha1.SizedPolicyWith100MB, "104857600"},
-	}
-	textFormat := v1alpha1.TEXT
-	for _, tc := range tests {
-		rt := &v1alpha1.PythonRuntime{
-			Log: &v1alpha1.RuntimeLogConfig{
-				Level:        "INFO",
-				Format:       &textFormat,
-				RotatePolicy: &tc.policy,
-			},
-		}
-		got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.RUNTIME)
-		if err != nil {
-			t.Fatalf("render error: %v", err)
-		}
-		if !strings.Contains(got, "[handlers]\nkeys=stream_handler,rotating_file_handler") {
-			t.Fatalf("handlers keys invalid for size rolling:\n%s", got)
-		}
-		if !strings.Contains(got, "[handler_rotating_file_handler]") ||
-			!strings.Contains(got, "class=logging.handlers.RotatingFileHandler") {
-			t.Fatalf("rotating handler invalid:\n%s", got)
-		}
-		if !strings.Contains(got, "args=('logs/functions/demo.log', 'a', "+tc.size+", 5)") {
-			t.Fatalf("rotating handler size invalid (expect %s):\n%s", tc.size, got)
-		}
-	}
-}
-
-func TestRenderINI_TimedRolling_Daily_Weekly_Monthly(t *testing.T) {
-	tests := []struct {
-		name     string
-		policy   v1alpha1.TriggeringPolicy
-		when     string
-		interval string
-	}{
-		{"daily", v1alpha1.TimedPolicyWithDaily, "D", "1"},
-		{"weekly", v1alpha1.TimedPolicyWithWeekly, "W0", "1"},
-		{"monthly", v1alpha1.TimedPolicyWithMonthly, "D", "30"},
-	}
-
-	jsonFormat := v1alpha1.JSON
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rt := &v1alpha1.PythonRuntime{
-				Log: &v1alpha1.RuntimeLogConfig{
-					Level:        "INFO",
-					Format:       &jsonFormat,
-					RotatePolicy: &tc.policy,
-				},
-			}
-			got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.RUNTIME)
-			if err != nil {
-				t.Fatalf("render error: %v", err)
-			}
-
-			if !strings.Contains(got, "[handlers]\nkeys=stream_handler,timed_rotating_file_handler") {
-				t.Fatalf("handlers keys invalid for timed rolling:\n%s", got)
-			}
-			if !strings.Contains(got, "[handler_timed_rotating_file_handler]") ||
-				!strings.Contains(got, "class=logging.handlers.TimedRotatingFileHandler") ||
-				!strings.Contains(got, "formatter=formatter") {
-				t.Fatalf("timed handler invalid:\n%s", got)
-			}
-			// args: ('file', 'WHEN', INTERVAL, 5)
-			if !strings.Contains(got, "args=('logs/functions/demo.log', '"+tc.when+"', "+tc.interval+", 5)") {
-				t.Fatalf("timed handler args invalid (expect when=%s interval=%s):\n%s", tc.when, tc.interval, got)
-			}
-
-			// json formatter selected
-			if !strings.Contains(got, "class=pythonjsonlogger.jsonlogger.JsonFormatter") {
-				t.Fatalf("json formatter not selected:\n%s", got)
-			}
-		})
-	}
-}
-
-func TestRenderINI_Sidecar_DefaultSizeRolling(t *testing.T) {
-	textFormat := v1alpha1.TEXT
-	rt := &v1alpha1.PythonRuntime{
-		Log: &v1alpha1.RuntimeLogConfig{
-			Level:  "INFO",
-			Format: &textFormat,
-		},
-	}
-	got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.SIDECAR)
-	if err != nil {
-		t.Fatalf("render error: %v", err)
-	}
-
-	if !strings.Contains(got, "[handlers]\nkeys=stream_handler,rotating_file_handler") {
-		t.Fatalf("handlers keys invalid for sidecar:\n%s", got)
-	}
-	if !strings.Contains(got, "args=('logs/functions/demo.log', 'a', 10485760, 5)") {
-		t.Fatalf("sidecar default size rolling args invalid:\n%s", got)
-	}
-}
-
-func TestRenderINI_NoAccidentalHandlerPrefixInKeys(t *testing.T) {
-	textFormat := v1alpha1.TEXT
-	rt := &v1alpha1.PythonRuntime{
-		Log: &v1alpha1.RuntimeLogConfig{
-			Level:  "INFO",
-			Format: &textFormat,
-		},
-	}
-	got, err := renderPythonInstanceLoggingINITemplate("demo", rt, v1alpha1.RUNTIME)
-	if err != nil {
-		t.Fatalf("render error: %v", err)
-	}
-	if strings.Contains(got, "keys=handler_stream_handler") {
-		t.Fatalf("should not contain 'handler_stream_handler' in keys:\n%s", got)
 	}
 }

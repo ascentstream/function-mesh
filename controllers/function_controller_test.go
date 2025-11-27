@@ -245,7 +245,7 @@ func createFunction(function *v1alpha1.Function) {
 			containers := statefulSet.Spec.Template.Spec.Containers
 			Expect(len(containers) > 0).Should(BeTrue())
 			for _, container := range containers {
-				if container.Name == spec.FunctionContainerName {
+				if container.Name == "pulsar-function" {
 					fullCommand := strings.Join(container.Command, " ")
 					Expect(fullCommand).Should(ContainSubstring("--state_storage_serviceurl"),
 						"--state_storage_serviceurl should be set in [%s]", fullCommand)
@@ -286,7 +286,7 @@ func createFunction(function *v1alpha1.Function) {
 			if len(function.Spec.Pod.BuiltinAutoscaler) > 0 {
 				Expect(len(hpa.Spec.Metrics)).Should(Equal(len(function.Spec.Pod.BuiltinAutoscaler)))
 				for _, rule := range function.Spec.Pod.BuiltinAutoscaler {
-					autoscaler, _ := spec.GetBuiltinAutoScaler(rule, function.Spec.Resources)
+					autoscaler, _ := spec.GetBuiltinAutoScaler(rule)
 					Expect(autoscaler).Should(Not(BeNil()))
 					Expect(hpa.Spec.Metrics).Should(ContainElement(autoscaler.Metrics()[0]))
 				}

@@ -62,11 +62,7 @@ type FunctionSpec struct {
 	FilebeatImage string        `json:"filebeatImage,omitempty"`
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
-	FuncConfig *Config `json:"funcConfig,omitempty"`
-	// +kubebuilder:validation:Optional
-	SourceConfig *SourceConnectorSpec `json:"sourceConfig,omitempty"`
-	// +kubebuilder:validation:Optional
-	SinkConfig   *SinkConnectorSpec          `json:"sinkConfig,omitempty"`
+	FuncConfig   *Config                     `json:"funcConfig,omitempty"`
 	Resources    corev1.ResourceRequirements `json:"resources,omitempty"`
 	SecretsMap   map[string]SecretRef        `json:"secretsMap,omitempty"`
 	VolumeMounts []corev1.VolumeMount        `json:"volumeMounts,omitempty"`
@@ -123,13 +119,10 @@ type FunctionSpec struct {
 type FunctionStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	Conditions                      map[Component]ResourceCondition `json:"conditions"`
-	Replicas                        int32                           `json:"replicas"`
-	Selector                        string                          `json:"selector"`
-	ObservedGeneration              int64                           `json:"observedGeneration,omitempty"`
-	GlobalBackendConfigRevision     string                          `json:"globalBackendConfigRevision,omitempty"`
-	NamespacedBackendConfigRevision string                          `json:"namespacedBackendConfigRevision,omitempty"`
-	PendingChange                   string                          `json:"pendingChange,omitempty"`
+	Conditions         map[Component]ResourceCondition `json:"conditions"`
+	Replicas           int32                           `json:"replicas"`
+	Selector           string                          `json:"selector"`
+	ObservedGeneration int64                           `json:"observedGeneration,omitempty"`
 }
 
 // +genclient
@@ -154,44 +147,6 @@ type FunctionList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Function `json:"items"`
-}
-
-// SourceConnectorSpec describes configurable fields when a function overrides its source implementation.
-type SourceConnectorSpec struct {
-	// Archive points to a nar archive containing the connector. It can reference built-in connectors using the
-	// builtin:// scheme.
-	// +kubebuilder:validation:Optional
-	SourceType string `json:"sourceType,omitempty"` // refer to `--source-type` as builtin connector
-	// Builtin holds the resolved name of a built-in source connector.
-	// +kubebuilder:validation:Optional
-	BatchSourceConfig *BatchSourceConfig `json:"batchSourceConfig,omitempty"`
-	// ClassName is the fully qualified source implementation class.
-	// +kubebuilder:validation:Optional
-	ClassName string `json:"className,omitempty"`
-	// TypeClassName overrides the expected message type.
-	// +kubebuilder:validation:Optional
-	TypeClassName string `json:"typeClassName,omitempty"`
-	// Configs contains connector specific options.
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Configs *Config `json:"configs,omitempty"`
-}
-
-// SinkConnectorSpec describes configurable fields when a function overrides its sink implementation.
-type SinkConnectorSpec struct {
-	// SinkType refers to the built-in sink identifier when using connectors packaged with Pulsar.
-	// +kubebuilder:validation:Optional
-	SinkType string `json:"sinkType,omitempty"`
-	// ClassName is the fully qualified sink implementation class.
-	// +kubebuilder:validation:Optional
-	ClassName string `json:"className,omitempty"`
-	// TypeClassName overrides the message type for the sink.
-	// +kubebuilder:validation:Optional
-	TypeClassName string `json:"typeClassName,omitempty"`
-	// Configs contains connector specific options.
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Configs *Config `json:"configs,omitempty"`
 }
 
 func init() {

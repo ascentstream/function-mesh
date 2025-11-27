@@ -18,18 +18,15 @@
 package spec
 
 import (
-	"context"
 	"regexp"
-
-	corev1 "k8s.io/api/core/v1"
 
 	"github.com/streamnative/function-mesh/utils"
 	"google.golang.org/protobuf/encoding/protojson"
 	appsv1 "k8s.io/api/apps/v1"
 	autov2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 )
@@ -41,7 +38,13 @@ func MakeSinkHPA(sink *v1alpha1.Sink) *autov2.HorizontalPodAutoscaler {
 		Name:       sink.Name,
 		APIVersion: sink.APIVersion,
 	}
-	return MakeHPA(objectMeta, targetRef, sink.Spec.MinReplicas, sink.Spec.MaxReplicas, sink.Spec.Pod, sink.Spec.Resources)
+	if isBuiltinHPAEnabled(sink.Spec.MinReplicas, sink.Spec.MaxReplicas, sink.Spec.Pod) {
+		return makeBuiltinHPA(objectMeta, *sink.Spec.MinReplicas, *sink.Spec.MaxReplicas, targetRef,
+			sink.Spec.Pod.BuiltinAutoscaler)
+	} else if !isDefaultHPAEnabled(sink.Spec.MinReplicas, sink.Spec.MaxReplicas, sink.Spec.Pod) {
+		return makeHPA(objectMeta, *sink.Spec.MinReplicas, *sink.Spec.MaxReplicas, sink.Spec.Pod, targetRef)
+	}
+	return makeDefaultHPA(objectMeta, *sink.Spec.MinReplicas, *sink.Spec.MaxReplicas, targetRef)
 }
 
 func MakeSinkService(sink *v1alpha1.Sink) *corev1.Service {
@@ -50,36 +53,14 @@ func MakeSinkService(sink *v1alpha1.Sink) *corev1.Service {
 	return MakeService(objectMeta, labels)
 }
 
-func MakeSinkStatefulSet(ctx context.Context, cli client.Client, sink *v1alpha1.Sink) (*appsv1.StatefulSet, error) {
+func MakeSinkStatefulSet(sink *v1alpha1.Sink) *appsv1.StatefulSet {
 	objectMeta := MakeSinkObjectMeta(sink)
-
-	runnerImagePullSecrets := getSinkRunnerImagePullSecret()
-	for _, mapSecret := range runnerImagePullSecrets {
-		if value, ok := mapSecret["name"]; ok {
-			sink.Spec.Pod.ImagePullSecrets = append(sink.Spec.Pod.ImagePullSecrets, corev1.LocalObjectReference{Name: value})
-		}
-	}
-	runnerImagePullPolicy := getSinkRunnerImagePullPolicy()
-	sink.Spec.ImagePullPolicy = runnerImagePullPolicy
-
-	statefulSet := MakeStatefulSet(objectMeta, sink.Spec.Replicas, sink.Spec.DownloaderImage, makeSinkContainer(sink),
-		makeSinkVolumes(sink, sink.Spec.Pulsar.AuthConfig), makeSinkLabels(sink), sink.Spec.Pod, sink.Spec.Pulsar.AuthConfig,
-		sink.Spec.Pulsar.TLSConfig, sink.Spec.Pulsar.PulsarConfig, sink.Spec.Pulsar.AuthSecret, sink.Spec.Pulsar.TLSSecret,
-		sink.Spec.Java, sink.Spec.Python, sink.Spec.Golang, sink.Spec.Pod.Env, sink.Spec.LogTopic, sink.Spec.FilebeatImage,
-		sink.Spec.LogTopicAgent, sink.Spec.VolumeMounts, nil, nil)
-
-	globalBackendConfigVersion, namespacedBackendConfigVersion, err := PatchStatefulSet(ctx, cli, sink.Namespace, statefulSet)
-	if err != nil {
-		return nil, err
-	}
-	if globalBackendConfigVersion != "" {
-		sink.Status.GlobalBackendConfigRevision = globalBackendConfigVersion
-	}
-	if namespacedBackendConfigVersion != "" {
-		sink.Status.NamespacedBackendConfigRevision = namespacedBackendConfigVersion
-	}
-
-	return statefulSet, nil
+	return MakeStatefulSet(objectMeta, sink.Spec.Replicas, sink.Spec.DownloaderImage, makeSinkContainer(sink),
+		makeFilebeatContainer(sink.Spec.VolumeMounts, sink.Spec.Pod.Env, sink.Spec.Name, sink.Spec.LogTopic, sink.Spec.LogTopicAgent,
+			sink.Spec.Pulsar.TLSConfig, sink.Spec.Pulsar.AuthConfig, sink.Spec.Pulsar.PulsarConfig, sink.Spec.Pulsar.TLSSecret,
+			sink.Spec.Pulsar.AuthSecret, sink.Spec.FilebeatImage),
+		makeSinkVolumes(sink, sink.Spec.Pulsar.AuthConfig), makeSinkLabels(sink), sink.Spec.Pod, *sink.Spec.Pulsar,
+		sink.Spec.Java, sink.Spec.Python, sink.Spec.Golang, sink.Spec.VolumeMounts, nil, nil)
 }
 
 func MakeSinkServiceName(sink *v1alpha1.Sink) string {
@@ -107,18 +88,18 @@ func makeSinkContainer(sink *v1alpha1.Sink) *corev1.Container {
 	allowPrivilegeEscalation := false
 	mounts := makeSinkVolumeMounts(sink, sink.Spec.Pulsar.AuthConfig)
 	if utils.EnableInitContainers {
-		mounts = append(mounts, generateDownloaderVolumeMountsForRuntime(sink.Spec.Java, nil, nil, nil)...)
+		mounts = append(mounts, generateDownloaderVolumeMountsForRuntime(sink.Spec.Java, nil, nil)...)
 	}
 	return &corev1.Container{
 		// TODO new container to pull user code image and upload jars into bookkeeper
-		Name:            SinkContainerName,
+		Name:            "pulsar-sink",
 		Image:           getSinkRunnerImage(&sink.Spec),
 		Command:         MakeSinkCommand(sink),
 		Ports:           []corev1.ContainerPort{GRPCPort, MetricsPort},
 		Env:             generateBasicContainerEnv(sink.Spec.SecretsMap, sink.Spec.Pod.Env),
 		Resources:       sink.Spec.Resources,
 		ImagePullPolicy: imagePullPolicy,
-		EnvFrom: GenerateContainerEnvFrom(sink.Spec.Pulsar.PulsarConfig, sink.Spec.Pulsar.AuthSecret,
+		EnvFrom: generateContainerEnvFrom(sink.Spec.Pulsar.PulsarConfig, sink.Spec.Pulsar.AuthSecret,
 			sink.Spec.Pulsar.TLSSecret),
 		VolumeMounts:  mounts,
 		LivenessProbe: probe,
@@ -197,24 +178,24 @@ func MakeSinkCleanUpJob(sink *v1alpha1.Sink) *v1.Job {
 }
 
 func makeSinkVolumes(sink *v1alpha1.Sink, authConfig *v1alpha1.AuthConfig) []corev1.Volume {
-	return GeneratePodVolumes(
+	return generatePodVolumes(
 		sink.Spec.Pod.Volumes,
 		nil,
 		sink.Spec.Input.SourceSpecs,
 		sink.Spec.Pulsar.TLSConfig,
 		authConfig,
-		GetRuntimeLogConfigNames(sink.Spec.Java, sink.Spec.Python, sink.Spec.Golang),
+		getRuntimeLogConfigNames(sink.Spec.Java, sink.Spec.Python, sink.Spec.Golang),
 		sink.Spec.LogTopicAgent)
 }
 
 func makeSinkVolumeMounts(sink *v1alpha1.Sink, authConfig *v1alpha1.AuthConfig) []corev1.VolumeMount {
-	return GenerateContainerVolumeMounts(
+	return generateContainerVolumeMounts(
 		sink.Spec.VolumeMounts,
 		nil,
 		sink.Spec.Input.SourceSpecs,
 		sink.Spec.Pulsar.TLSConfig,
 		authConfig,
-		GetRuntimeLogConfigNames(sink.Spec.Java, sink.Spec.Python, sink.Spec.Golang),
+		getRuntimeLogConfigNames(sink.Spec.Java, sink.Spec.Python, sink.Spec.Golang),
 		sink.Spec.LogTopicAgent)
 }
 
@@ -226,27 +207,15 @@ func MakeSinkCommand(sink *v1alpha1.Sink) []string {
 		hasPulsarctl = true
 		hasWget = true
 	}
-	mountPath := extractMountPath(spec.Java.Jar)
-	instancePath := DefaultPulsarFunctionsJavaInstancePath
-	if spec.Java.InstancePath != nil && *spec.Java.InstancePath != "" {
-		instancePath = *spec.Java.InstancePath
-	}
-	entryClass := DefaultPulsarFunctionsJavaInstanceEntryClass
-	if spec.Java.EntryClass != nil && *spec.Java.EntryClass != "" {
-		entryClass = *spec.Java.EntryClass
-	}
-	return MakeJavaFunctionCommand(spec.Java.JarLocation, mountPath,
+	return MakeJavaFunctionCommand(spec.Java.JarLocation, spec.Java.Jar,
 		spec.Name, spec.ClusterName,
-		GenerateJavaLogConfigCommand(spec.Java, spec.LogTopicAgent),
+		generateJavaLogConfigCommand(spec.Java, spec.LogTopicAgent),
 		parseJavaLogLevel(spec.Java),
 		generateSinkDetailsInJSON(sink),
-		spec.Java.ExtraDependenciesDir,
-		"",
-		string(sink.UID),
-		spec.Resources.Limits.Memory(),
+		getDecimalSIMemory(spec.Resources.Requests.Memory()), spec.Java.ExtraDependenciesDir, string(sink.UID),
 		spec.Java.JavaOpts, hasPulsarctl, hasWget, spec.Pulsar.AuthSecret != "", spec.Pulsar.TLSSecret != "",
 		spec.SecretsMap, spec.StateConfig, spec.Pulsar.TLSConfig, spec.Pulsar.AuthConfig, nil,
-		GenerateJavaLogConfigFileName(spec.Java), instancePath, entryClass)
+		generateJavaLogConfigFileName(spec.Java))
 }
 
 func generateSinkDetailsInJSON(sink *v1alpha1.Sink) string {

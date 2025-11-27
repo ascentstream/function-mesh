@@ -20,23 +20,19 @@ package spec
 import (
 	"os"
 
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
 type RunnerImages struct {
-	Java           string            `yaml:"java,omitempty"`
-	Python         string            `yaml:"python,omitempty"`
-	Go             string            `yaml:"go,omitempty"`
-	GenericRuntime map[string]string `yaml:"genericRuntime,omitempty"`
+	Java   string `yaml:"java,omitempty"`
+	Python string `yaml:"python,omitempty"`
+	Go     string `yaml:"go,omitempty"`
 }
 
 type ControllerConfigs struct {
-	RunnerImages           RunnerImages        `yaml:"runnerImages,omitempty"`
-	RunnerImagePullSecrets []map[string]string `yaml:"runnerImagePullSecrets,omitempty"`
-	RunnerImagePullPolicy  corev1.PullPolicy   `yaml:"imagePullPolicy,omitempty"`
-	ResourceLabels         map[string]string   `yaml:"resourceLabels,omitempty"`
-	ResourceAnnotations    map[string]string   `yaml:"resourceAnnotations,omitempty"`
+	RunnerImages        RunnerImages      `yaml:"runnerImages,omitempty"`
+	ResourceLabels      map[string]string `yaml:"resourceLabels,omitempty"`
+	ResourceAnnotations map[string]string `yaml:"resourceAnnotations,omitempty"`
 }
 
 var Configs = DefaultConfigs()
@@ -47,12 +43,6 @@ func DefaultConfigs() *ControllerConfigs {
 			Java:   DefaultJavaRunnerImage,
 			Python: DefaultPythonRunnerImage,
 			Go:     DefaultGoRunnerImage,
-			GenericRuntime: map[string]string{
-				"nodejs":     DefaultGenericNodejsRunnerImage,
-				"python":     DefaultGenericPythonRunnerImage,
-				"executable": DefaultGenericRunnerImage,
-				"wasm":       DefaultGenericRunnerImage,
-			},
 		},
 	}
 }

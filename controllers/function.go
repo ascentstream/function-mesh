@@ -19,18 +19,19 @@ package controllers
 
 import (
 	"context"
-
-	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
-
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 	"github.com/streamnative/function-mesh/controllers/spec"
 	appsv1 "k8s.io/api/apps/v1"
 	autov2 "k8s.io/api/autoscaling/v2"
+	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (r *FunctionReconciler) ObserveFunctionStatefulSet(ctx context.Context, function *v1alpha1.Function) error {
@@ -69,12 +70,7 @@ func (r *FunctionReconciler) ObserveFunctionStatefulSet(ctx context.Context, fun
 	}
 	function.Status.Selector = selector.String()
 
-	needUpdate, err := r.checkIfStatefulSetNeedUpdate(ctx, statefulSet, function)
-	if err != nil {
-		r.Log.Error(err, "error comparing statefulSet")
-		return err
-	}
-	if needUpdate {
+	if r.checkIfStatefulSetNeedUpdate(statefulSet, function) {
 		condition.Status = metav1.ConditionFalse
 		condition.Action = v1alpha1.Update
 		function.Status.Conditions[v1alpha1.StatefulSet] = condition
@@ -98,10 +94,7 @@ func (r *FunctionReconciler) ApplyFunctionStatefulSet(ctx context.Context, funct
 	if condition.Status == metav1.ConditionTrue && !newGeneration {
 		return nil
 	}
-	desiredStatefulSet, err := spec.MakeFunctionStatefulSet(ctx, r.Client, function)
-	if err != nil {
-		return err
-	}
+	desiredStatefulSet := spec.MakeFunctionStatefulSet(function)
 	keepStatefulSetUnchangeableFields(ctx, r, r.Log, desiredStatefulSet)
 	desiredStatefulSetSpec := desiredStatefulSet.Spec
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, desiredStatefulSet, func() error {
@@ -157,16 +150,44 @@ func (r *FunctionReconciler) ApplyFunctionService(ctx context.Context, function 
 	if condition.Status == metav1.ConditionTrue && !newGeneration {
 		return nil
 	}
-	desiredService := spec.MakeFunctionService(function)
-	desiredServiceSpec := desiredService.Spec
-	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, desiredService, func() error {
-		// function service mutate logic
-		desiredService.Spec = desiredServiceSpec
-		return nil
-	}); err != nil {
-		r.Log.Error(err, "error create or update service for function",
+	desired := spec.MakeFunctionService(function)
+
+	observed := &corev1.Service{}
+	if err := r.Client.Get(ctx, types.NamespacedName{
+		Name: desired.Name, Namespace: desired.Namespace,
+	}, observed); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.createService(ctx, function, desired)
+		}
+		return err
+	}
+
+	if !equality.Semantic.DeepDerivative(desired.Spec, observed.Spec) {
+		return r.updateService(ctx, function, observed, desired)
+	}
+	return nil
+}
+
+func (r *FunctionReconciler) createService(ctx context.Context, function *v1alpha1.Function, svcObj *corev1.Service) error {
+	if err := r.Client.Create(ctx, svcObj); err != nil {
+		r.Log.Error(err, "error create service for function",
 			"namespace", function.Namespace, "name", function.Name,
-			"service name", desiredService.Name)
+			"service name", svcObj.Name)
+		return err
+	}
+	return nil
+}
+
+func (r *FunctionReconciler) updateService(ctx context.Context, function *v1alpha1.Function, foundSvc, desiredSvc *corev1.Service) error {
+	patch := client.MergeFrom(foundSvc.DeepCopy())
+	foundSvc.Spec.Ports = desiredSvc.Spec.Ports
+	foundSvc.Spec.Selector = desiredSvc.Spec.Selector
+	foundSvc.Spec.ClusterIP = desiredSvc.Spec.ClusterIP
+	foundSvc.Spec.Type = desiredSvc.Spec.Type
+	if err := r.Client.Patch(ctx, foundSvc, patch); err != nil {
+		r.Log.Error(err, "error update service for function",
+			"namespace", function.Namespace, "name", function.Name,
+			"service name", foundSvc.Name)
 		return err
 	}
 	return nil
@@ -175,7 +196,6 @@ func (r *FunctionReconciler) ApplyFunctionService(ctx context.Context, function 
 func (r *FunctionReconciler) ObserveFunctionHPA(ctx context.Context, function *v1alpha1.Function) error {
 	if function.Spec.MaxReplicas == nil {
 		// HPA not enabled, skip further action
-		delete(function.Status.Conditions, v1alpha1.HPA)
 		return nil
 	}
 
@@ -221,12 +241,7 @@ func (r *FunctionReconciler) ObserveFunctionHPA(ctx context.Context, function *v
 func (r *FunctionReconciler) ApplyFunctionHPA(ctx context.Context, function *v1alpha1.Function,
 	newGeneration bool) error {
 	if function.Spec.MaxReplicas == nil {
-		// HPA not enabled, delete HPA if it exists
-		err := deleteHPA(ctx, r.Client, types.NamespacedName{Namespace: function.Namespace, Name: function.Name})
-		if err != nil {
-			r.Log.Error(err, "failed to delete HPA for function", "namespace", function.Namespace, "name", function.Name)
-			return err
-		}
+		// HPA not enabled, skip further action
 		return nil
 	}
 	condition := function.Status.Conditions[v1alpha1.HPA]
@@ -251,7 +266,6 @@ func (r *FunctionReconciler) ApplyFunctionHPA(ctx context.Context, function *v1a
 func (r *FunctionReconciler) ObserveFunctionHPAV2Beta2(ctx context.Context, function *v1alpha1.Function) error {
 	if function.Spec.MaxReplicas == nil {
 		// HPA not enabled, skip further action
-		delete(function.Status.Conditions, v1alpha1.HPA)
 		return nil
 	}
 
@@ -297,12 +311,7 @@ func (r *FunctionReconciler) ObserveFunctionHPAV2Beta2(ctx context.Context, func
 func (r *FunctionReconciler) ApplyFunctionHPAV2Beta2(ctx context.Context, function *v1alpha1.Function,
 	newGeneration bool) error {
 	if function.Spec.MaxReplicas == nil {
-		// HPA not enabled, delete HPA if it exists
-		err := deleteHPAV2Beta2(ctx, r.Client, types.NamespacedName{Namespace: function.Namespace, Name: function.Name})
-		if err != nil {
-			r.Log.Error(err, "failed to delete HPA for function", "namespace", function.Namespace, "name", function.Name)
-			return err
-		}
+		// HPA not enabled, skip further action
 		return nil
 	}
 	condition := function.Status.Conditions[v1alpha1.HPA]
@@ -356,7 +365,7 @@ func (r *FunctionReconciler) ApplyFunctionVPA(ctx context.Context, function *v1a
 func (r *FunctionReconciler) ApplyFunctionCleanUpJob(ctx context.Context, function *v1alpha1.Function) error {
 	if !spec.NeedCleanup(function) {
 		desiredJob := spec.MakeFunctionCleanUpJob(function)
-		if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+		if err := r.Delete(ctx, desiredJob); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
 			}
@@ -400,7 +409,7 @@ func (r *FunctionReconciler) ApplyFunctionCleanUpJob(ctx context.Context, functi
 				}
 			} else {
 				// delete the cleanup job
-				if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+				if err := r.Delete(ctx, desiredJob); err != nil {
 					return err
 				}
 			}
@@ -415,29 +424,18 @@ func (r *FunctionReconciler) ApplyFunctionCleanUpJob(ctx context.Context, functi
 
 			desiredJob := spec.MakeFunctionCleanUpJob(function)
 			// delete the cleanup job
-			if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+			if err := r.Delete(ctx, desiredJob); err != nil {
 				return err
 			}
+
 		}
 	}
 	return nil
 }
 
-func (r *FunctionReconciler) checkIfStatefulSetNeedUpdate(ctx context.Context, statefulSet *appsv1.StatefulSet,
-	function *v1alpha1.Function) (bool, error) {
-	desiredStatefulSet, err := spec.MakeFunctionStatefulSet(ctx, r.Client, function)
-	if err != nil {
-		return false, err
-	}
-	needUpdate := !spec.CheckIfStatefulSetSpecIsEqual(&statefulSet.Spec, &desiredStatefulSet.Spec)
-	if needUpdate {
-		diff, err := spec.CreateDiff(statefulSet, desiredStatefulSet)
-		if err != nil {
-			return needUpdate, err
-		}
-		function.Status.PendingChange = diff
-	}
-	return needUpdate, nil
+func (r *FunctionReconciler) checkIfStatefulSetNeedUpdate(statefulSet *appsv1.StatefulSet,
+	function *v1alpha1.Function) bool {
+	return !spec.CheckIfStatefulSetSpecIsEqual(&statefulSet.Spec, &spec.MakeFunctionStatefulSet(function).Spec)
 }
 
 func (r *FunctionReconciler) checkIfHPANeedUpdate(hpa *autov2.HorizontalPodAutoscaler,

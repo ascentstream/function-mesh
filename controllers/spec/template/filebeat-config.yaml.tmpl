@@ -3,10 +3,9 @@ filebeat.inputs:
   paths:
   - /pulsar/logs/functions/*.log
 output.pulsar:
-  fast_fail: true
   url: \${brokerServiceURL}
   topic: \${logTopic}
-  name: \${POD_NAME}
+  name: \${logName}
   token: \${clientAuthenticationParameters:""}
   oauth2:
     enabled: \${oauth2Enabled:false}

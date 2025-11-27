@@ -21,10 +21,11 @@ import (
 	"context"
 	"time"
 
+	"github.com/streamnative/function-mesh/pkg/monitoring"
+
 	"github.com/go-logr/logr"
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 	"github.com/streamnative/function-mesh/controllers/spec"
-	"github.com/streamnative/function-mesh/pkg/monitoring"
 	"github.com/streamnative/function-mesh/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/batch/v1"
@@ -36,7 +37,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -54,13 +54,9 @@ type SourceReconciler struct {
 // +kubebuilder:rbac:groups=compute.functionmesh.io,resources=sources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=compute.functionmesh.io,resources=sources/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=compute.functionmesh.io,resources=sources/finalizers,verbs=get;update
-// +kubebuilder:rbac:groups=compute.functionmesh.io,resources=backendconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.k8s.io,resources=verticalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;create;update;delete
@@ -98,24 +94,10 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		source.Status.Conditions = make(map[v1alpha1.Component]v1alpha1.ResourceCondition)
 	}
 
-	isNewGeneration := r.checkIfSourceGenerationsIsIncreased(source)
-
 	err = r.ObserveSourceStatefulSet(ctx, source)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	// skip reconcile if pauseRollout is set to true and the generation is not increased
-	if spec.IsPauseRollout(source) && !isNewGeneration {
-		err = r.Status().Update(ctx, source)
-		if err != nil {
-			r.Log.Error(err, "failed to update source status after observing statefulset")
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	} else {
-		source.Status.PendingChange = ""
-	}
-
 	err = r.ObserveSourceService(ctx, source)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -142,6 +124,8 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.Log.Error(err, "failed to update source status")
 		return ctrl.Result{}, err
 	}
+
+	isNewGeneration := r.checkIfSourceGenerationsIsIncreased(source)
 
 	err = r.ApplySourceStatefulSet(ctx, source, isNewGeneration)
 	if err != nil {
@@ -200,10 +184,5 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.GroupVersionFlags != nil && r.GroupVersionFlags.APIAutoscalingGroupVersion != "" {
 		AddControllerBuilderOwn(manager, r.GroupVersionFlags.APIAutoscalingGroupVersion)
 	}
-	manager.Watches(&v1alpha1.BackendConfig{}, handler.EnqueueRequestsFromMapFunc(
-		func(ctx context.Context, object client.Object) []reconcile.Request {
-			return handleBackendConfigEnqueueRequests(mgr, object, &v1alpha1.SourceList{})
-		}),
-	)
 	return manager.Complete(r)
 }

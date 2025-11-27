@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/streamnative/function-mesh/pkg/monitoring"
+
 	v1 "k8s.io/api/batch/v1"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/go-logr/logr"
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
@@ -55,13 +55,10 @@ type FunctionReconciler struct {
 // +kubebuilder:rbac:groups=compute.functionmesh.io,resources=functions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=compute.functionmesh.io,resources=functions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=compute.functionmesh.io,resources=functions/finalizers,verbs=get;update
-// +kubebuilder:rbac:groups=compute.functionmesh.io,resources=backendconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.k8s.io,resources=verticalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;create;update;delete
@@ -99,24 +96,10 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		function.Status.Conditions = make(map[v1alpha1.Component]v1alpha1.ResourceCondition)
 	}
 
-	isNewGeneration := r.checkIfFunctionGenerationsIsIncreased(function)
-
 	err = r.ObserveFunctionStatefulSet(ctx, function)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	// skip reconcile if pauseRollout is set to true and the generation is not increased
-	if spec.IsPauseRollout(function) && !isNewGeneration {
-		err = r.Status().Update(ctx, function)
-		if err != nil {
-			r.Log.Error(err, "failed to update function status after observing statefulset")
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	} else {
-		function.Status.PendingChange = ""
-	}
-
 	err = r.ObserveFunctionService(ctx, function)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -143,6 +126,8 @@ func (r *FunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		r.Log.Error(err, "failed to update function status after observing resources")
 		return ctrl.Result{}, err
 	}
+
+	isNewGeneration := r.checkIfFunctionGenerationsIsIncreased(function)
 
 	err = r.ApplyFunctionStatefulSet(ctx, function, isNewGeneration)
 	if err != nil {
@@ -196,12 +181,6 @@ func (r *FunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Owns(&v1.Job{})
-
-	manager.Watches(&v1alpha1.BackendConfig{}, handler.EnqueueRequestsFromMapFunc(
-		func(ctx context.Context, object client.Object) []reconcile.Request {
-			return handleBackendConfigEnqueueRequests(mgr, object, &v1alpha1.FunctionList{})
-		}),
-	)
 
 	if r.GroupVersionFlags != nil && r.GroupVersionFlags.WatchVPACRDs {
 		manager.Owns(&vpav1.VerticalPodAutoscaler{})

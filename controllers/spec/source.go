@@ -18,7 +18,6 @@
 package spec
 
 import (
-	"context"
 	"fmt"
 	"regexp"
 
@@ -29,7 +28,6 @@ import (
 	v1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 )
@@ -41,7 +39,13 @@ func MakeSourceHPA(source *v1alpha1.Source) *autov2.HorizontalPodAutoscaler {
 		Name:       source.Name,
 		APIVersion: source.APIVersion,
 	}
-	return MakeHPA(objectMeta, targetRef, source.Spec.MinReplicas, source.Spec.MaxReplicas, source.Spec.Pod, source.Spec.Resources)
+	if isBuiltinHPAEnabled(source.Spec.MinReplicas, source.Spec.MaxReplicas, source.Spec.Pod) {
+		return makeBuiltinHPA(objectMeta, *source.Spec.MinReplicas, *source.Spec.MaxReplicas, targetRef,
+			source.Spec.Pod.BuiltinAutoscaler)
+	} else if !isDefaultHPAEnabled(source.Spec.MinReplicas, source.Spec.MaxReplicas, source.Spec.Pod) {
+		return makeHPA(objectMeta, *source.Spec.MinReplicas, *source.Spec.MaxReplicas, source.Spec.Pod, targetRef)
+	}
+	return makeDefaultHPA(objectMeta, *source.Spec.MinReplicas, *source.Spec.MaxReplicas, targetRef)
 }
 
 func MakeSourceService(source *v1alpha1.Source) *corev1.Service {
@@ -50,36 +54,14 @@ func MakeSourceService(source *v1alpha1.Source) *corev1.Service {
 	return MakeService(objectMeta, labels)
 }
 
-func MakeSourceStatefulSet(ctx context.Context, cli client.Client, source *v1alpha1.Source) (*appsv1.StatefulSet, error) {
+func MakeSourceStatefulSet(source *v1alpha1.Source) *appsv1.StatefulSet {
 	objectMeta := MakeSourceObjectMeta(source)
-
-	runnerImagePullSecrets := getSourceRunnerImagePullSecret()
-	for _, mapSecret := range runnerImagePullSecrets {
-		if value, ok := mapSecret["name"]; ok {
-			source.Spec.Pod.ImagePullSecrets = append(source.Spec.Pod.ImagePullSecrets, corev1.LocalObjectReference{Name: value})
-		}
-	}
-	runnerImagePullPolicy := getSourceRunnerImagePullPolicy()
-	source.Spec.ImagePullPolicy = runnerImagePullPolicy
-
-	statefulSet := MakeStatefulSet(objectMeta, source.Spec.Replicas, source.Spec.DownloaderImage, makeSourceContainer(source),
-		makeSourceVolumes(source, source.Spec.Pulsar.AuthConfig), makeSourceLabels(source), source.Spec.Pod, source.Spec.Pulsar.AuthConfig,
-		source.Spec.Pulsar.TLSConfig, source.Spec.Pulsar.PulsarConfig, source.Spec.Pulsar.AuthSecret, source.Spec.Pulsar.TLSSecret,
-		source.Spec.Java, source.Spec.Python, source.Spec.Golang, source.Spec.Pod.Env, source.Spec.LogTopic, source.Spec.FilebeatImage,
-		source.Spec.LogTopicAgent, source.Spec.VolumeMounts, nil, nil)
-
-	globalBackendConfigVersion, namespacedBackendConfigVersion, err := PatchStatefulSet(ctx, cli, source.Namespace, statefulSet)
-	if err != nil {
-		return nil, err
-	}
-	if globalBackendConfigVersion != "" {
-		source.Status.GlobalBackendConfigRevision = globalBackendConfigVersion
-	}
-	if namespacedBackendConfigVersion != "" {
-		source.Status.NamespacedBackendConfigRevision = namespacedBackendConfigVersion
-	}
-
-	return statefulSet, nil
+	return MakeStatefulSet(objectMeta, source.Spec.Replicas, source.Spec.DownloaderImage, makeSourceContainer(source),
+		makeFilebeatContainer(source.Spec.VolumeMounts, source.Spec.Pod.Env, source.Spec.Name, source.Spec.LogTopic, source.Spec.LogTopicAgent,
+			source.Spec.Pulsar.TLSConfig, source.Spec.Pulsar.AuthConfig, source.Spec.Pulsar.PulsarConfig, source.Spec.Pulsar.TLSSecret,
+			source.Spec.Pulsar.AuthSecret, source.Spec.FilebeatImage),
+		makeSourceVolumes(source, source.Spec.Pulsar.AuthConfig), makeSourceLabels(source), source.Spec.Pod, *source.Spec.Pulsar,
+		source.Spec.Java, source.Spec.Python, source.Spec.Golang, source.Spec.VolumeMounts, nil, nil)
 }
 
 func MakeSourceObjectMeta(source *v1alpha1.Source) *metav1.ObjectMeta {
@@ -102,18 +84,18 @@ func makeSourceContainer(source *v1alpha1.Source) *corev1.Container {
 	allowPrivilegeEscalation := false
 	mounts := makeSourceVolumeMounts(source, source.Spec.Pulsar.AuthConfig)
 	if utils.EnableInitContainers {
-		mounts = append(mounts, generateDownloaderVolumeMountsForRuntime(source.Spec.Java, nil, nil, nil)...)
+		mounts = append(mounts, generateDownloaderVolumeMountsForRuntime(source.Spec.Java, nil, nil)...)
 	}
 	return &corev1.Container{
 		// TODO new container to pull user code image and upload jars into bookkeeper
-		Name:            SourceContainerName,
+		Name:            "pulsar-source",
 		Image:           getSourceRunnerImage(&source.Spec),
 		Command:         makeSourceCommand(source),
 		Ports:           []corev1.ContainerPort{GRPCPort, MetricsPort},
 		Env:             generateBasicContainerEnv(source.Spec.SecretsMap, source.Spec.Pod.Env),
 		Resources:       source.Spec.Resources,
 		ImagePullPolicy: imagePullPolicy,
-		EnvFrom: GenerateContainerEnvFrom(source.Spec.Pulsar.PulsarConfig, source.Spec.Pulsar.AuthSecret,
+		EnvFrom: generateContainerEnvFrom(source.Spec.Pulsar.PulsarConfig, source.Spec.Pulsar.AuthSecret,
 			source.Spec.Pulsar.TLSSecret),
 		VolumeMounts:  mounts,
 		LivenessProbe: probe,
@@ -143,24 +125,24 @@ func makeSourceLabels(source *v1alpha1.Source) map[string]string {
 }
 
 func makeSourceVolumes(source *v1alpha1.Source, authConfig *v1alpha1.AuthConfig) []corev1.Volume {
-	return GeneratePodVolumes(
+	return generatePodVolumes(
 		source.Spec.Pod.Volumes,
 		source.Spec.Output.ProducerConf,
 		nil,
 		source.Spec.Pulsar.TLSConfig,
 		authConfig,
-		GetRuntimeLogConfigNames(source.Spec.Java, source.Spec.Python, source.Spec.Golang),
+		getRuntimeLogConfigNames(source.Spec.Java, source.Spec.Python, source.Spec.Golang),
 		source.Spec.LogTopicAgent)
 }
 
 func makeSourceVolumeMounts(source *v1alpha1.Source, authConfig *v1alpha1.AuthConfig) []corev1.VolumeMount {
-	return GenerateContainerVolumeMounts(
+	return generateContainerVolumeMounts(
 		source.Spec.VolumeMounts,
 		source.Spec.Output.ProducerConf,
 		nil,
 		source.Spec.Pulsar.TLSConfig,
 		authConfig,
-		GetRuntimeLogConfigNames(source.Spec.Java, source.Spec.Python, source.Spec.Golang),
+		getRuntimeLogConfigNames(source.Spec.Java, source.Spec.Python, source.Spec.Golang),
 		source.Spec.LogTopicAgent)
 }
 
@@ -172,28 +154,15 @@ func makeSourceCommand(source *v1alpha1.Source) []string {
 		hasPulsarctl = true
 		hasWget = true
 	}
-
-	mountPath := extractMountPath(spec.Java.Jar)
-	instancePath := DefaultPulsarFunctionsJavaInstancePath
-	if spec.Java.InstancePath != nil && *spec.Java.InstancePath != "" {
-		instancePath = *spec.Java.InstancePath
-	}
-	entryClass := DefaultPulsarFunctionsJavaInstanceEntryClass
-	if spec.Java.EntryClass != nil && *spec.Java.EntryClass != "" {
-		entryClass = *spec.Java.EntryClass
-	}
-	return MakeJavaFunctionCommand(spec.Java.JarLocation, mountPath,
+	return MakeJavaFunctionCommand(spec.Java.JarLocation, spec.Java.Jar,
 		spec.Name, spec.ClusterName,
-		GenerateJavaLogConfigCommand(spec.Java, spec.LogTopicAgent),
+		generateJavaLogConfigCommand(spec.Java, spec.LogTopicAgent),
 		parseJavaLogLevel(spec.Java),
 		generateSourceDetailsInJSON(source),
-		spec.Java.ExtraDependenciesDir,
-		"",
-		string(source.UID),
-		spec.Resources.Limits.Memory(),
+		getDecimalSIMemory(spec.Resources.Requests.Memory()), spec.Java.ExtraDependenciesDir, string(source.UID),
 		spec.Java.JavaOpts, hasPulsarctl, hasWget, spec.Pulsar.AuthSecret != "", spec.Pulsar.TLSSecret != "",
 		spec.SecretsMap, spec.StateConfig, spec.Pulsar.TLSConfig, spec.Pulsar.AuthConfig, nil,
-		GenerateJavaLogConfigFileName(spec.Java), instancePath, entryClass)
+		generateJavaLogConfigFileName(spec.Java))
 }
 
 func generateSourceDetailsInJSON(source *v1alpha1.Source) string {

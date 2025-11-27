@@ -22,7 +22,7 @@ spec:
   template:
     metadata:
       annotations:
-        traffic.sidecar.istio.io/excludeInboundPorts: '9443,8443'
+        traffic.sidecar.istio.io/excludeInboundPorts: '9443'
       labels:
         control-plane: controller-manager
         app: function-mesh-operator
@@ -33,9 +33,6 @@ spec:
         - /manager
         args:
         - --enable-leader-election
-        - --namespaced-backend-config=backend-config
-        - --global-backend-config=global-backend-config
-        - --global-backend-config-namespace=sn-system
         image: controller:latest
         name: manager
         resources:

@@ -19,18 +19,19 @@ package controllers
 
 import (
 	"context"
-
-	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
-
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 	"github.com/streamnative/function-mesh/controllers/spec"
 	appsv1 "k8s.io/api/apps/v1"
 	autov2 "k8s.io/api/autoscaling/v2"
+	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (r *SourceReconciler) ObserveSourceStatefulSet(ctx context.Context, source *v1alpha1.Source) error {
@@ -69,12 +70,7 @@ func (r *SourceReconciler) ObserveSourceStatefulSet(ctx context.Context, source 
 	}
 	source.Status.Selector = selector.String()
 
-	needUpdate, err := r.checkIfStatefulSetNeedUpdate(ctx, statefulSet, source)
-	if err != nil {
-		r.Log.Error(err, "error comparing statefulSet")
-		return err
-	}
-	if needUpdate {
+	if r.checkIfStatefulSetNeedUpdate(statefulSet, source) {
 		condition.Status = metav1.ConditionFalse
 		condition.Action = v1alpha1.Update
 		source.Status.Conditions[v1alpha1.StatefulSet] = condition
@@ -98,10 +94,7 @@ func (r *SourceReconciler) ApplySourceStatefulSet(ctx context.Context, source *v
 	if condition.Status == metav1.ConditionTrue && !newGeneration {
 		return nil
 	}
-	desiredStatefulSet, err := spec.MakeSourceStatefulSet(ctx, r.Client, source)
-	if err != nil {
-		return err
-	}
+	desiredStatefulSet := spec.MakeSourceStatefulSet(source)
 	keepStatefulSetUnchangeableFields(ctx, r, r.Log, desiredStatefulSet)
 	desiredStatefulSetSpec := desiredStatefulSet.Spec
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, desiredStatefulSet, func() error {
@@ -156,16 +149,44 @@ func (r *SourceReconciler) ApplySourceService(ctx context.Context, source *v1alp
 	if condition.Status == metav1.ConditionTrue && !newGeneration {
 		return nil
 	}
-	desiredService := spec.MakeSourceService(source)
-	desiredServiceSpec := desiredService.Spec
-	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, desiredService, func() error {
-		// source service mutate logic
-		desiredService.Spec = desiredServiceSpec
-		return nil
-	}); err != nil {
-		r.Log.Error(err, "error create or update service for source",
+	desired := spec.MakeSourceService(source)
+
+	observed := &corev1.Service{}
+	if err := r.Client.Get(ctx, types.NamespacedName{
+		Name: desired.Name, Namespace: desired.Namespace,
+	}, observed); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.createService(ctx, source, desired)
+		}
+		return err
+	}
+
+	if !equality.Semantic.DeepDerivative(desired.Spec, observed.Spec) {
+		return r.updateService(ctx, source, observed, desired)
+	}
+	return nil
+}
+
+func (r *SourceReconciler) createService(ctx context.Context, source *v1alpha1.Source, svcObj *corev1.Service) error {
+	if err := r.Client.Create(ctx, svcObj); err != nil {
+		r.Log.Error(err, "error create service for source",
 			"namespace", source.Namespace, "name", source.Name,
-			"service name", desiredService.Name)
+			"service name", svcObj.Name)
+		return err
+	}
+	return nil
+}
+
+func (r *SourceReconciler) updateService(ctx context.Context, source *v1alpha1.Source, foundSvc, desiredSvc *corev1.Service) error {
+	patch := client.MergeFrom(foundSvc.DeepCopy())
+	foundSvc.Spec.Ports = desiredSvc.Spec.Ports
+	foundSvc.Spec.Selector = desiredSvc.Spec.Selector
+	foundSvc.Spec.ClusterIP = desiredSvc.Spec.ClusterIP
+	foundSvc.Spec.Type = desiredSvc.Spec.Type
+	if err := r.Client.Patch(ctx, foundSvc, patch); err != nil {
+		r.Log.Error(err, "error update service for source",
+			"namespace", source.Namespace, "name", source.Name,
+			"service name", foundSvc.Name)
 		return err
 	}
 	return nil
@@ -174,7 +195,6 @@ func (r *SourceReconciler) ApplySourceService(ctx context.Context, source *v1alp
 func (r *SourceReconciler) ObserveSourceHPA(ctx context.Context, source *v1alpha1.Source) error {
 	if source.Spec.MaxReplicas == nil {
 		// HPA not enabled, skip further action
-		delete(source.Status.Conditions, v1alpha1.HPA)
 		return nil
 	}
 
@@ -219,12 +239,7 @@ func (r *SourceReconciler) ObserveSourceHPA(ctx context.Context, source *v1alpha
 
 func (r *SourceReconciler) ApplySourceHPA(ctx context.Context, source *v1alpha1.Source, newGeneration bool) error {
 	if source.Spec.MaxReplicas == nil {
-		// HPA not enabled, delete HPA if it exists
-		err := deleteHPA(ctx, r.Client, types.NamespacedName{Namespace: source.Namespace, Name: source.Name})
-		if err != nil {
-			r.Log.Error(err, "failed to delete HPA for source", "namespace", source.Namespace, "name", source.Name)
-			return err
-		}
+		// HPA not enabled, skip further action
 		return nil
 	}
 	condition := source.Status.Conditions[v1alpha1.HPA]
@@ -249,7 +264,6 @@ func (r *SourceReconciler) ApplySourceHPA(ctx context.Context, source *v1alpha1.
 func (r *SourceReconciler) ObserveSourceHPAV2Beta2(ctx context.Context, source *v1alpha1.Source) error {
 	if source.Spec.MaxReplicas == nil {
 		// HPA not enabled, skip further action
-		delete(source.Status.Conditions, v1alpha1.HPA)
 		return nil
 	}
 
@@ -295,12 +309,7 @@ func (r *SourceReconciler) ObserveSourceHPAV2Beta2(ctx context.Context, source *
 func (r *SourceReconciler) ApplySourceHPAV2Beta2(ctx context.Context, source *v1alpha1.Source,
 	newGeneration bool) error {
 	if source.Spec.MaxReplicas == nil {
-		// HPA not enabled, delete HPA if it exists
-		err := deleteHPAV2Beta2(ctx, r.Client, types.NamespacedName{Namespace: source.Namespace, Name: source.Name})
-		if err != nil {
-			r.Log.Error(err, "failed to delete HPA for source", "namespace", source.Namespace, "name", source.Name)
-			return err
-		}
+		// HPA not enabled, skip further action
 		return nil
 	}
 	condition := source.Status.Conditions[v1alpha1.HPA]
@@ -354,7 +363,7 @@ func (r *SourceReconciler) ApplySourceVPA(ctx context.Context, source *v1alpha1.
 func (r *SourceReconciler) ApplySourceCleanUpJob(ctx context.Context, source *v1alpha1.Source) error {
 	if !spec.NeedCleanup(source) {
 		desiredJob := spec.MakeSourceCleanUpJob(source)
-		if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+		if err := r.Delete(ctx, desiredJob); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
 			}
@@ -398,7 +407,7 @@ func (r *SourceReconciler) ApplySourceCleanUpJob(ctx context.Context, source *v1
 				}
 			} else {
 				// delete the cleanup job
-				if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+				if err := r.Delete(ctx, desiredJob); err != nil {
 					return err
 				}
 			}
@@ -413,7 +422,7 @@ func (r *SourceReconciler) ApplySourceCleanUpJob(ctx context.Context, source *v1
 
 			desiredJob := spec.MakeSourceCleanUpJob(source)
 			// delete the cleanup job
-			if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+			if err := r.Delete(ctx, desiredJob); err != nil {
 				return err
 			}
 
@@ -422,20 +431,8 @@ func (r *SourceReconciler) ApplySourceCleanUpJob(ctx context.Context, source *v1
 	return nil
 }
 
-func (r *SourceReconciler) checkIfStatefulSetNeedUpdate(ctx context.Context, statefulSet *appsv1.StatefulSet, source *v1alpha1.Source) (bool, error) {
-	desiredStatefulSet, err := spec.MakeSourceStatefulSet(ctx, r.Client, source)
-	if err != nil {
-		return false, err
-	}
-	needUpdate := !spec.CheckIfStatefulSetSpecIsEqual(&statefulSet.Spec, &desiredStatefulSet.Spec)
-	if needUpdate {
-		diff, err := spec.CreateDiff(statefulSet, desiredStatefulSet)
-		if err != nil {
-			return needUpdate, err
-		}
-		source.Status.PendingChange = diff
-	}
-	return needUpdate, nil
+func (r *SourceReconciler) checkIfStatefulSetNeedUpdate(statefulSet *appsv1.StatefulSet, source *v1alpha1.Source) bool {
+	return !spec.CheckIfStatefulSetSpecIsEqual(&statefulSet.Spec, &spec.MakeSourceStatefulSet(source).Spec)
 }
 
 func (r *SourceReconciler) checkIfHPANeedUpdate(hpa *autov2.HorizontalPodAutoscaler, source *v1alpha1.Source) bool {

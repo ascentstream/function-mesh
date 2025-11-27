@@ -40,6 +40,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  creationTimestamp: null
   name: manager-role
 rules:
 - apiGroups:
@@ -58,41 +59,6 @@ rules:
   - autoscaling
   resources:
   - horizontalpodautoscalers
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - autoscaling.k8s.io
-  resources:
-  - verticalpodautoscalers
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - compute.functionmesh.io
-  resources:
-  - backendconfigs
   verbs:
   - create
   - delete
@@ -136,13 +102,6 @@ rules:
 - apiGroups:
   - compute.functionmesh.io
   resources:
-  - functions/finalizers
-  verbs:
-  - get
-  - update
-- apiGroups:
-  - compute.functionmesh.io
-  resources:
   - functions/status
   verbs:
   - get
@@ -160,13 +119,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - compute.functionmesh.io
-  resources:
-  - sinks/finalizers
-  verbs:
-  - get
-  - update
 - apiGroups:
   - compute.functionmesh.io
   resources:
@@ -190,52 +142,11 @@ rules:
 - apiGroups:
   - compute.functionmesh.io
   resources:
-  - sources/finalizers
-  verbs:
-  - get
-  - update
-- apiGroups:
-  - compute.functionmesh.io
-  resources:
   - sources/status
   verbs:
   - get
   - patch
   - update
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/exec
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -264,16 +175,6 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: metrics-reader
-rules:
-- nonResourceURLs:
-  - /metrics
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
   name: proxy-role
 rules:
 - apiGroups:
@@ -288,6 +189,16 @@ rules:
   - subjectaccessreviews
   verbs:
   - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

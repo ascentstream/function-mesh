@@ -1,5 +1,5 @@
 # Current Operator version
-VERSION ?= 0.25.1
+VERSION ?= 0.17.0
 # Default image tag
 DOCKER_REPO := $(if $(DOCKER_REPO),$(DOCKER_REPO),streamnative)
 OPERATOR_IMG ?= ${DOCKER_REPO}/function-mesh:v$(VERSION)
@@ -72,7 +72,7 @@ test-ginkgo: generate fmt vet manifests envtest
 
 .PHONY: envtest
 envtest:
-	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.0.0-20250630142431-4c2e9cec2954
+	test -s $(LOCALBIN)/setup-envtest || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 
 # Build manager binary
 manager: generate fmt vet
@@ -130,7 +130,7 @@ image-push:
 # find or download controller-gen
 # download controller-gen if necessary
 controller-gen:
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.15.0)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.9.2)
 
 kustomize: ## Download kustomize locally if necessary.
 	$(call go-get-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v4@v4.5.5)
@@ -270,7 +270,7 @@ redhat-certificated-bundle: yq kustomize manifests
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(shell docker inspect --format='{{json .RepoDigests}}' $(OPERATOR_IMG) | jq --arg IMAGE_TAG_BASE "$(IMAGE_TAG_BASE)" -c '.[] | select(index($$IMAGE_TAG_BASE))' -r)
 	$(KUSTOMIZE) build config/manifests | operator-sdk generate bundle -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
 	$(YQ) eval -i ".metadata.annotations.\"olm.skipRange\" = \"<$(VERSION)\"" bundle/manifests/function-mesh.clusterserviceversion.yaml
-	#$(YQ) eval -i ".metadata.annotations.\"olm.properties\" = ([{\"type\": \"olm.maxOpenShiftVersion\", \"value\": \"4.13\"}] | @json)" bundle/manifests/function-mesh.clusterserviceversion.yaml
+	$(YQ) eval -i ".metadata.annotations.\"olm.properties\" = ([{\"type\": \"olm.maxOpenShiftVersion\", \"value\": \"4.11\"}] | @json)" bundle/manifests/function-mesh.clusterserviceversion.yaml
 	$(YQ) eval -i ".metadata.annotations.createdAt = \"$(BUILD_DATETIME)\"" bundle/manifests/function-mesh.clusterserviceversion.yaml
 	$(YQ) eval -i ".metadata.annotations.containerImage = \"$(shell docker inspect --format='{{json .RepoDigests}}' $(OPERATOR_IMG) | jq --arg IMAGE_TAG_BASE "$(IMAGE_TAG_BASE)" -c '.[] | select(index($$IMAGE_TAG_BASE))' -r)\"" bundle/manifests/function-mesh.clusterserviceversion.yaml
 	$(YQ) eval -i '.annotations += {"operators.operatorframework.io.bundle.channel.default.v1":"alpha"}' bundle/metadata/annotations.yaml
@@ -303,3 +303,14 @@ redhat-certificated-image-push: ## Push the bundle image.
 generate-metricsdocs:
 	mkdir -p $(shell pwd)/docs/monitoring
 	go run -ldflags="${LDFLAGS}" ./pkg/monitoring/metricsdocs > docs/monitoring/metrics.md
+
+PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+.PHONY: docker-buildx
+docker-buildx: ## Build and push docker image for the manager for cross-platform support
+	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	- docker buildx create --name project-v3-builder
+	docker buildx use project-v3-builder
+	- docker buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- docker buildx rm project-v3-builder
+	rm Dockerfile.cross

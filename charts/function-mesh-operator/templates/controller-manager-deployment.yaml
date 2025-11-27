@@ -26,8 +26,6 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: "{{ .Values.controllerManager.metrics.port }}"
-        prometheus.io/scheme: "{{ .Values.controllerManager.metrics.scheme }}"
-        traffic.sidecar.istio.io/excludeInboundPorts: '9443,8443'
     spec:
     {{- if .Values.controllerManager.serviceAccount }}
       serviceAccount: {{ .Values.controllerManager.serviceAccount }}
@@ -63,10 +61,6 @@ spec:
           - --pprof-addr=:{{ .Values.controllerManager.pprof.port }}
           - --config-file={{ .Values.controllerManager.configFile }}
           - --enable-init-containers={{ .Values.controllerManager.enableInitContainers }}
-          - --global-backend-config={{ .Values.controllerManager.globalBackendConfig }}
-          - --global-backend-config-namespace={{ .Values.controllerManager.globalBackendConfigNamespace }}
-          - --namespaced-backend-config={{ .Values.controllerManager.namespacedBackendConfig }}
-          - --add-default-affinity={{ .Values.controllerManager.addDefaultAffinity }}
         env:
           - name: NAMESPACE
             valueFrom:

@@ -24,11 +24,8 @@ import (
 
 	"github.com/streamnative/function-mesh/utils"
 	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
@@ -45,38 +42,6 @@ import (
 const (
 	CleanUpFinalizerName = "cleanup.subscription.finalizer"
 )
-
-func deleteHPAV2Beta2(ctx context.Context, r client.Client, name types.NamespacedName) error {
-	hpa := &autoscalingv2beta2.HorizontalPodAutoscaler{}
-	err := r.Get(ctx, name, hpa)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	err = r.Delete(ctx, hpa)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func deleteHPA(ctx context.Context, r client.Client, name types.NamespacedName) error {
-	hpa := &autov2.HorizontalPodAutoscaler{}
-	err := r.Get(ctx, name, hpa)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	err = r.Delete(ctx, hpa)
-	if err != nil {
-		return err
-	}
-	return nil
-}
 
 func observeVPA(ctx context.Context, r client.Reader, name types.NamespacedName, vpaSpec *v1alpha1.VPASpec,
 	conditions map[v1alpha1.Component]v1alpha1.ResourceCondition) error {
@@ -251,15 +216,9 @@ func ConvertHPAV2ToV2beta2(hpa *autov2.HorizontalPodAutoscaler) *autoscalingv2be
 	}
 
 	result := &autoscalingv2beta2.HorizontalPodAutoscaler{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "autoscaling/v2beta2",
-			Kind:       "HorizontalPodAutoscaler",
-		},
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       hpa.Namespace,
-			Name:            hpa.Name,
-			Labels:          hpa.Labels,
-			OwnerReferences: hpa.OwnerReferences,
+			Namespace: hpa.Namespace,
+			Name:      hpa.Name,
 		},
 		Spec: autoscalingv2beta2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2beta2.CrossVersionObjectReference{
@@ -270,35 +229,21 @@ func ConvertHPAV2ToV2beta2(hpa *autov2.HorizontalPodAutoscaler) *autoscalingv2be
 			MinReplicas: hpa.Spec.MinReplicas,
 			MaxReplicas: hpa.Spec.MaxReplicas,
 			Metrics:     make([]autoscalingv2beta2.MetricSpec, len(hpa.Spec.Metrics)),
+			Behavior: &autoscalingv2beta2.HorizontalPodAutoscalerBehavior{
+				ScaleUp: &autoscalingv2beta2.HPAScalingRules{
+					StabilizationWindowSeconds: hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds,
+					SelectPolicy:               (*autoscalingv2beta2.ScalingPolicySelect)(hpa.Spec.Behavior.ScaleUp.SelectPolicy),
+					Policies: make([]autoscalingv2beta2.HPAScalingPolicy,
+						len(hpa.Spec.Behavior.ScaleUp.Policies)),
+				},
+				ScaleDown: &autoscalingv2beta2.HPAScalingRules{
+					StabilizationWindowSeconds: hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds,
+					SelectPolicy:               (*autoscalingv2beta2.ScalingPolicySelect)(hpa.Spec.Behavior.ScaleDown.SelectPolicy),
+					Policies: make([]autoscalingv2beta2.HPAScalingPolicy,
+						len(hpa.Spec.Behavior.ScaleDown.Policies)),
+				},
+			},
 		},
-	}
-
-	result.Spec.Behavior = &autoscalingv2beta2.HorizontalPodAutoscalerBehavior{}
-	if hpa.Spec.Behavior != nil {
-		if hpa.Spec.Behavior.ScaleUp != nil {
-			result.Spec.Behavior.ScaleUp.StabilizationWindowSeconds = hpa.Spec.Behavior.ScaleUp.StabilizationWindowSeconds
-			result.Spec.Behavior.ScaleUp.SelectPolicy = (*autoscalingv2beta2.ScalingPolicySelect)(hpa.Spec.Behavior.ScaleUp.SelectPolicy)
-			result.Spec.Behavior.ScaleUp.Policies = make([]autoscalingv2beta2.HPAScalingPolicy, len(hpa.Spec.Behavior.ScaleUp.Policies))
-			for i, policy := range hpa.Spec.Behavior.ScaleUp.Policies {
-				result.Spec.Behavior.ScaleUp.Policies[i] = autoscalingv2beta2.HPAScalingPolicy{
-					Type:          autoscalingv2beta2.HPAScalingPolicyType(policy.Type),
-					Value:         policy.Value,
-					PeriodSeconds: policy.PeriodSeconds,
-				}
-			}
-		}
-		if hpa.Spec.Behavior.ScaleDown != nil {
-			result.Spec.Behavior.ScaleDown.StabilizationWindowSeconds = hpa.Spec.Behavior.ScaleDown.StabilizationWindowSeconds
-			result.Spec.Behavior.ScaleDown.SelectPolicy = (*autoscalingv2beta2.ScalingPolicySelect)(hpa.Spec.Behavior.ScaleDown.SelectPolicy)
-			result.Spec.Behavior.ScaleDown.Policies = make([]autoscalingv2beta2.HPAScalingPolicy, len(hpa.Spec.Behavior.ScaleDown.Policies))
-			for i, policy := range hpa.Spec.Behavior.ScaleDown.Policies {
-				result.Spec.Behavior.ScaleDown.Policies[i] = autoscalingv2beta2.HPAScalingPolicy{
-					Type:          autoscalingv2beta2.HPAScalingPolicyType(policy.Type),
-					Value:         policy.Value,
-					PeriodSeconds: policy.PeriodSeconds,
-				}
-			}
-		}
 	}
 
 	for i, metric := range hpa.Spec.Metrics {
@@ -373,60 +318,21 @@ func ConvertHPAV2ToV2beta2(hpa *autov2.HorizontalPodAutoscaler) *autoscalingv2be
 		result.Spec.Metrics[i] = ms
 	}
 
-	return result
-}
-
-func getBackgroundDeletionPolicy() client.DeleteOption {
-	backgroundDeletion := metav1.DeletePropagationBackground
-	var deleteOptions client.DeleteOption = &client.DeleteOptions{
-		PropagationPolicy: &backgroundDeletion,
-	}
-	return deleteOptions
-}
-
-func listAndEnqueueRequests(ctx context.Context, mgr manager.Manager, list client.ObjectList, namespace string) ([]reconcile.Request, error) {
-	err := mgr.GetClient().List(ctx, list, client.InNamespace(namespace))
-	if err != nil {
-		mgr.GetLogger().Error(err, "failed to list resources in namespace: "+namespace)
-		return nil, err
-	}
-	requests := []reconcile.Request{}
-	items, err := meta.ExtractList(list)
-	if err != nil {
-		return nil, err
-	}
-	for _, item := range items {
-		metaObj, err := meta.Accessor(item)
-		if err != nil {
-			return nil, err
+	for i, policy := range hpa.Spec.Behavior.ScaleUp.Policies {
+		result.Spec.Behavior.ScaleUp.Policies[i] = autoscalingv2beta2.HPAScalingPolicy{
+			Type:          autoscalingv2beta2.HPAScalingPolicyType(policy.Type),
+			Value:         policy.Value,
+			PeriodSeconds: policy.PeriodSeconds,
 		}
-		requests = append(requests, reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: metaObj.GetNamespace(), Name: metaObj.GetName()},
-		})
-	}
-	return requests, nil
-}
-
-func handleBackendConfigEnqueueRequests(mgr manager.Manager, object client.Object, listType client.ObjectList) []reconcile.Request {
-	backendConfig := object.(*v1alpha1.BackendConfig)
-	// if autoUpdate is false, we don't need to reconcile functions
-	if !backendConfig.Spec.AutoUpdate {
-		return nil
 	}
 
-	var namespace string
-	if object.GetName() == utils.GlobalBackendConfig && object.GetNamespace() == utils.GlobalBackendConfigNamespace {
-		namespace = ""
-	} else if object.GetName() == utils.NamespacedBackendConfig {
-		namespace = object.GetNamespace()
-	} else {
-		return nil
+	for i, policy := range hpa.Spec.Behavior.ScaleDown.Policies {
+		result.Spec.Behavior.ScaleDown.Policies[i] = autoscalingv2beta2.HPAScalingPolicy{
+			Type:          autoscalingv2beta2.HPAScalingPolicyType(policy.Type),
+			Value:         policy.Value,
+			PeriodSeconds: policy.PeriodSeconds,
+		}
 	}
 
-	ctx := context.Background()
-	requests, err := listAndEnqueueRequests(ctx, mgr, listType, namespace)
-	if err != nil {
-		return nil
-	}
-	return requests
+	return result
 }

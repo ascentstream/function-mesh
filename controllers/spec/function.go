@@ -18,11 +18,8 @@
 package spec
 
 import (
-	"context"
 	"regexp"
-	"strings"
 
-	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 	"github.com/streamnative/function-mesh/utils"
 	"google.golang.org/protobuf/encoding/protojson"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,8 +27,9 @@ import (
 	v1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 )
 
 // log is for logging in this package.
@@ -44,7 +42,13 @@ func MakeFunctionHPA(function *v1alpha1.Function) *autov2.HorizontalPodAutoscale
 		Name:       function.Name,
 		APIVersion: function.APIVersion,
 	}
-	return MakeHPA(objectMeta, targetRef, function.Spec.MinReplicas, function.Spec.MaxReplicas, function.Spec.Pod, function.Spec.Resources)
+	if isBuiltinHPAEnabled(function.Spec.MinReplicas, function.Spec.MaxReplicas, function.Spec.Pod) {
+		return makeBuiltinHPA(objectMeta, *function.Spec.MinReplicas, *function.Spec.MaxReplicas, targetRef,
+			function.Spec.Pod.BuiltinAutoscaler)
+	} else if !isDefaultHPAEnabled(function.Spec.MinReplicas, function.Spec.MaxReplicas, function.Spec.Pod) {
+		return makeHPA(objectMeta, *function.Spec.MinReplicas, *function.Spec.MaxReplicas, function.Spec.Pod, targetRef)
+	}
+	return makeDefaultHPA(objectMeta, *function.Spec.MinReplicas, *function.Spec.MaxReplicas, targetRef)
 }
 
 func MakeFunctionService(function *v1alpha1.Function) *corev1.Service {
@@ -53,38 +57,17 @@ func MakeFunctionService(function *v1alpha1.Function) *corev1.Service {
 	return MakeService(objectMeta, labels)
 }
 
-func MakeFunctionStatefulSet(ctx context.Context, cli client.Client, function *v1alpha1.Function) (*appsv1.StatefulSet, error) {
+func MakeFunctionStatefulSet(function *v1alpha1.Function) *appsv1.StatefulSet {
 	objectMeta := MakeFunctionObjectMeta(function)
-
-	runnerImagePullSecrets := getFunctionRunnerImagePullSecret()
-	for _, mapSecret := range runnerImagePullSecrets {
-		if value, ok := mapSecret["name"]; ok {
-			function.Spec.Pod.ImagePullSecrets = append(function.Spec.Pod.ImagePullSecrets, corev1.LocalObjectReference{Name: value})
-		}
-	}
-	runnerImagePullPolicy := getFunctionRunnerImagePullPolicy()
-	function.Spec.ImagePullPolicy = runnerImagePullPolicy
-
-	labels := makeFunctionLabels(function)
-	statefulSet := MakeStatefulSet(objectMeta, function.Spec.Replicas, function.Spec.DownloaderImage,
-		makeFunctionContainer(function), makeFunctionVolumes(function, function.Spec.Pulsar.AuthConfig), labels, function.Spec.Pod,
-		function.Spec.Pulsar.AuthConfig, function.Spec.Pulsar.TLSConfig, function.Spec.Pulsar.PulsarConfig, function.Spec.Pulsar.AuthSecret,
-		function.Spec.Pulsar.TLSSecret, function.Spec.Java, function.Spec.Python, function.Spec.Golang, function.Spec.Pod.Env,
-		function.Spec.LogTopic, function.Spec.FilebeatImage, function.Spec.LogTopicAgent, function.Spec.VolumeMounts,
-		function.Spec.VolumeClaimTemplates, function.Spec.PersistentVolumeClaimRetentionPolicy)
-
-	globalBackendConfigVersion, namespacedBackendConfigVersion, err := PatchStatefulSet(ctx, cli, function.Namespace, statefulSet)
-	if err != nil {
-		return nil, err
-	}
-	if globalBackendConfigVersion != "" {
-		function.Status.GlobalBackendConfigRevision = globalBackendConfigVersion
-	}
-	if namespacedBackendConfigVersion != "" {
-		function.Status.NamespacedBackendConfigRevision = namespacedBackendConfigVersion
-	}
-
-	return statefulSet, nil
+	return MakeStatefulSet(objectMeta, function.Spec.Replicas, function.Spec.DownloaderImage,
+		makeFunctionContainer(function), makeFilebeatContainer(function.Spec.VolumeMounts, function.Spec.Pod.Env,
+			function.Spec.Name, function.Spec.LogTopic, function.Spec.LogTopicAgent, function.Spec.Pulsar.TLSConfig,
+			function.Spec.Pulsar.AuthConfig, function.Spec.Pulsar.PulsarConfig, function.Spec.Pulsar.TLSSecret,
+			function.Spec.Pulsar.AuthSecret, function.Spec.FilebeatImage),
+		makeFunctionVolumes(function, function.Spec.Pulsar.AuthConfig), makeFunctionLabels(function), function.Spec.Pod,
+		*function.Spec.Pulsar, function.Spec.Java, function.Spec.Python, function.Spec.Golang,
+		function.Spec.VolumeMounts, function.Spec.VolumeClaimTemplates,
+		function.Spec.PersistentVolumeClaimRetentionPolicy)
 }
 
 func MakeFunctionObjectMeta(function *v1alpha1.Function) *metav1.ObjectMeta {
@@ -149,22 +132,22 @@ func MakeFunctionCleanUpJob(function *v1alpha1.Function) *v1.Job {
 }
 
 func makeFunctionVolumes(function *v1alpha1.Function, authConfig *v1alpha1.AuthConfig) []corev1.Volume {
-	return GeneratePodVolumes(function.Spec.Pod.Volumes,
+	return generatePodVolumes(function.Spec.Pod.Volumes,
 		function.Spec.Output.ProducerConf,
 		function.Spec.Input.SourceSpecs,
 		function.Spec.Pulsar.TLSConfig,
 		authConfig,
-		GetRuntimeLogConfigNames(function.Spec.Java, function.Spec.Python, function.Spec.Golang),
+		getRuntimeLogConfigNames(function.Spec.Java, function.Spec.Python, function.Spec.Golang),
 		function.Spec.LogTopicAgent)
 }
 
 func makeFunctionVolumeMounts(function *v1alpha1.Function, authConfig *v1alpha1.AuthConfig) []corev1.VolumeMount {
-	return GenerateContainerVolumeMounts(function.Spec.VolumeMounts,
+	return generateContainerVolumeMounts(function.Spec.VolumeMounts,
 		function.Spec.Output.ProducerConf,
 		function.Spec.Input.SourceSpecs,
 		function.Spec.Pulsar.TLSConfig,
 		authConfig,
-		GetRuntimeLogConfigNames(function.Spec.Java, function.Spec.Python, function.Spec.Golang),
+		getRuntimeLogConfigNames(function.Spec.Java, function.Spec.Python, function.Spec.Golang),
 		function.Spec.LogTopicAgent)
 }
 
@@ -178,18 +161,18 @@ func makeFunctionContainer(function *v1alpha1.Function) *corev1.Container {
 	mounts := makeFunctionVolumeMounts(function, function.Spec.Pulsar.AuthConfig)
 	if utils.EnableInitContainers {
 		mounts = append(mounts,
-			generateDownloaderVolumeMountsForRuntime(function.Spec.Java, function.Spec.Python, function.Spec.Golang, function.Spec.GenericRuntime)...)
+			generateDownloaderVolumeMountsForRuntime(function.Spec.Java, function.Spec.Python, function.Spec.Golang)...)
 	}
 	return &corev1.Container{
 		// TODO new container to pull user code image and upload jars into bookkeeper
-		Name:            FunctionContainerName,
+		Name:            "pulsar-function",
 		Image:           getFunctionRunnerImage(&function.Spec),
 		Command:         makeFunctionCommand(function),
 		Ports:           []corev1.ContainerPort{GRPCPort, MetricsPort},
 		Env:             generateContainerEnv(function),
 		Resources:       function.Spec.Resources,
 		ImagePullPolicy: imagePullPolicy,
-		EnvFrom: GenerateContainerEnvFrom(function.Spec.Pulsar.PulsarConfig, function.Spec.Pulsar.AuthSecret,
+		EnvFrom: generateContainerEnvFrom(function.Spec.Pulsar.PulsarConfig, function.Spec.Pulsar.AuthSecret,
 			function.Spec.Pulsar.TLSSecret),
 		VolumeMounts:  mounts,
 		LivenessProbe: probe,
@@ -223,11 +206,6 @@ func makeFunctionLabels(function *v1alpha1.Function) map[string]string {
 func makeFunctionCommand(function *v1alpha1.Function) []string {
 	spec := function.Spec
 
-	connectorsDirectory := ""
-	if spec.SourceConfig != nil || spec.SinkConfig != nil {
-		connectorsDirectory = DefaultConnectorsDirectory
-	}
-
 	hasPulsarctl := function.Spec.ImageHasPulsarctl
 	hasWget := function.Spec.ImageHasWget
 	if match, _ := regexp.MatchString(RunnerImageHasPulsarctl, function.Spec.Image); match {
@@ -236,34 +214,22 @@ func makeFunctionCommand(function *v1alpha1.Function) []string {
 	}
 	if spec.Java != nil {
 		if spec.Java.Jar != "" {
-			mountPath := extractMountPath(spec.Java.Jar)
-			instancePath := DefaultPulsarFunctionsJavaInstancePath
-			if spec.Java.InstancePath != nil && *spec.Java.InstancePath != "" {
-				instancePath = *spec.Java.InstancePath
-			}
-			entryClass := DefaultPulsarFunctionsJavaInstanceEntryClass
-			if spec.Java.EntryClass != nil && *spec.Java.EntryClass != "" {
-				entryClass = *spec.Java.EntryClass
-			}
-			return MakeJavaFunctionCommand(spec.Java.JarLocation, mountPath,
+			return MakeJavaFunctionCommand(spec.Java.JarLocation, spec.Java.Jar,
 				spec.Name, spec.ClusterName,
-				GenerateJavaLogConfigCommand(spec.Java, spec.LogTopicAgent),
+				generateJavaLogConfigCommand(spec.Java, spec.LogTopicAgent),
 				parseJavaLogLevel(spec.Java),
 				generateFunctionDetailsInJSON(function),
-				spec.Java.ExtraDependenciesDir,
-				connectorsDirectory,
+				getDecimalSIMemory(spec.Resources.Requests.Memory()), spec.Java.ExtraDependenciesDir,
 				string(function.UID),
-				spec.Resources.Limits.Memory(),
 				spec.Java.JavaOpts, hasPulsarctl, hasWget,
 				spec.Pulsar.AuthSecret != "", spec.Pulsar.TLSSecret != "",
 				spec.SecretsMap, spec.StateConfig, spec.Pulsar.TLSConfig,
 				spec.Pulsar.AuthConfig, spec.MaxPendingAsyncRequests,
-				GenerateJavaLogConfigFileName(function.Spec.Java), instancePath, entryClass)
+				generateJavaLogConfigFileName(function.Spec.Java))
 		}
 	} else if spec.Python != nil {
 		if spec.Python.Py != "" {
-			mountPath := extractMountPath(spec.Python.Py)
-			return MakePythonFunctionCommand(spec.Python.PyLocation, mountPath,
+			return MakePythonFunctionCommand(spec.Python.PyLocation, spec.Python.Py,
 				spec.Name, spec.ClusterName,
 				generatePythonLogConfigCommand(spec.Name, spec.Python, spec.LogTopicAgent),
 				generateFunctionDetailsInJSON(function), string(function.UID), hasPulsarctl, hasWget,
@@ -272,17 +238,7 @@ func makeFunctionCommand(function *v1alpha1.Function) []string {
 		}
 	} else if spec.Golang != nil {
 		if spec.Golang.Go != "" {
-			mountPath := extractMountPath(spec.Golang.Go)
-			return MakeGoFunctionCommand(spec.Golang.GoLocation, mountPath, function)
-		}
-	} else if spec.GenericRuntime != nil {
-		if spec.GenericRuntime.FunctionFile != "" {
-			mountPath := extractMountPath(spec.GenericRuntime.FunctionFile)
-			return MakeGenericFunctionCommand(spec.GenericRuntime.FunctionFileLocation, mountPath,
-				spec.GenericRuntime.Language, spec.ClusterName,
-				generateFunctionDetailsInJSON(function), string(function.UID),
-				spec.Pulsar.AuthSecret != "", spec.Pulsar.TLSSecret != "", function.Spec.SecretsMap,
-				function.Spec.StateConfig, function.Spec.Pulsar.TLSConfig, function.Spec.Pulsar.AuthConfig)
+			return MakeGoFunctionCommand(spec.Golang.GoLocation, spec.Golang.Go, function)
 		}
 	}
 
@@ -298,19 +254,4 @@ func generateFunctionDetailsInJSON(function *v1alpha1.Function) string {
 	}
 	log.Info(string(json))
 	return string(json)
-}
-
-func extractMountPath(p string) string {
-	if utils.EnableInitContainers {
-		mountPath := p
-		// for relative path, volume should be mounted to the WorkDir
-		// and path also should be under the $WorkDir dir
-		if !strings.HasPrefix(p, "/") {
-			mountPath = WorkDir + p
-		} else if !strings.HasPrefix(p, WorkDir) {
-			mountPath = strings.Replace(p, "/", WorkDir, 1)
-		}
-		return mountPath
-	}
-	return p
 }

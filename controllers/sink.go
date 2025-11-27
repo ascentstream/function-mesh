@@ -19,18 +19,19 @@ package controllers
 
 import (
 	"context"
-
-	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
-
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 	"github.com/streamnative/function-mesh/controllers/spec"
 	appsv1 "k8s.io/api/apps/v1"
 	autov2 "k8s.io/api/autoscaling/v2"
+	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (r *SinkReconciler) ObserveSinkStatefulSet(ctx context.Context, sink *v1alpha1.Sink) error {
@@ -69,12 +70,7 @@ func (r *SinkReconciler) ObserveSinkStatefulSet(ctx context.Context, sink *v1alp
 	}
 	sink.Status.Selector = selector.String()
 
-	needUpdate, err := r.checkIfStatefulSetNeedUpdate(ctx, statefulSet, sink)
-	if err != nil {
-		r.Log.Error(err, "error comparing statefulSet")
-		return err
-	}
-	if needUpdate {
+	if r.checkIfStatefulSetNeedUpdate(statefulSet, sink) {
 		condition.Status = metav1.ConditionFalse
 		condition.Action = v1alpha1.Update
 		sink.Status.Conditions[v1alpha1.StatefulSet] = condition
@@ -97,10 +93,7 @@ func (r *SinkReconciler) ApplySinkStatefulSet(ctx context.Context, sink *v1alpha
 	if condition.Status == metav1.ConditionTrue && !newGeneration {
 		return nil
 	}
-	desiredStatefulSet, err := spec.MakeSinkStatefulSet(ctx, r.Client, sink)
-	if err != nil {
-		return err
-	}
+	desiredStatefulSet := spec.MakeSinkStatefulSet(sink)
 	keepStatefulSetUnchangeableFields(ctx, r, r.Log, desiredStatefulSet)
 	desiredStatefulSetSpec := desiredStatefulSet.Spec
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, desiredStatefulSet, func() error {
@@ -155,16 +148,44 @@ func (r *SinkReconciler) ApplySinkService(ctx context.Context, sink *v1alpha1.Si
 	if condition.Status == metav1.ConditionTrue && !newGeneration {
 		return nil
 	}
-	desiredService := spec.MakeSinkService(sink)
-	desiredServiceSpec := desiredService.Spec
-	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, desiredService, func() error {
-		// sink service mutate logic
-		desiredService.Spec = desiredServiceSpec
-		return nil
-	}); err != nil {
-		r.Log.Error(err, "error create or update service for sink",
+	desired := spec.MakeSinkService(sink)
+
+	observed := &corev1.Service{}
+	if err := r.Client.Get(ctx, types.NamespacedName{
+		Name: desired.Name, Namespace: desired.Namespace,
+	}, observed); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.createService(ctx, sink, desired)
+		}
+		return err
+	}
+
+	if !equality.Semantic.DeepDerivative(desired.Spec, observed.Spec) {
+		return r.updateService(ctx, sink, observed, desired)
+	}
+	return nil
+}
+
+func (r *SinkReconciler) createService(ctx context.Context, sink *v1alpha1.Sink, svcObj *corev1.Service) error {
+	if err := r.Client.Create(ctx, svcObj); err != nil {
+		r.Log.Error(err, "error create service for sink",
 			"namespace", sink.Namespace, "name", sink.Name,
-			"service name", desiredService.Name)
+			"service name", svcObj.Name)
+		return err
+	}
+	return nil
+}
+
+func (r *SinkReconciler) updateService(ctx context.Context, sink *v1alpha1.Sink, foundSvc, desiredSvc *corev1.Service) error {
+	patch := client.MergeFrom(foundSvc.DeepCopy())
+	foundSvc.Spec.Ports = desiredSvc.Spec.Ports
+	foundSvc.Spec.Selector = desiredSvc.Spec.Selector
+	foundSvc.Spec.ClusterIP = desiredSvc.Spec.ClusterIP
+	foundSvc.Spec.Type = desiredSvc.Spec.Type
+	if err := r.Client.Patch(ctx, foundSvc, patch); err != nil {
+		r.Log.Error(err, "error update service for sink",
+			"namespace", sink.Namespace, "name", sink.Name,
+			"service name", foundSvc.Name)
 		return err
 	}
 	return nil
@@ -173,7 +194,6 @@ func (r *SinkReconciler) ApplySinkService(ctx context.Context, sink *v1alpha1.Si
 func (r *SinkReconciler) ObserveSinkHPA(ctx context.Context, sink *v1alpha1.Sink) error {
 	if sink.Spec.MaxReplicas == nil {
 		// HPA not enabled, skip further action
-		delete(sink.Status.Conditions, v1alpha1.HPA)
 		return nil
 	}
 
@@ -218,12 +238,7 @@ func (r *SinkReconciler) ObserveSinkHPA(ctx context.Context, sink *v1alpha1.Sink
 
 func (r *SinkReconciler) ApplySinkHPA(ctx context.Context, sink *v1alpha1.Sink, newGeneration bool) error {
 	if sink.Spec.MaxReplicas == nil {
-		// HPA not enabled, delete HPA if it exists
-		err := deleteHPA(ctx, r.Client, types.NamespacedName{Namespace: sink.Namespace, Name: sink.Name})
-		if err != nil {
-			r.Log.Error(err, "failed to delete HPA for sink", "namespace", sink.Namespace, "name", sink.Name)
-			return err
-		}
+		// HPA not enabled, skip further action
 		return nil
 	}
 	condition := sink.Status.Conditions[v1alpha1.HPA]
@@ -248,7 +263,6 @@ func (r *SinkReconciler) ApplySinkHPA(ctx context.Context, sink *v1alpha1.Sink, 
 func (r *SinkReconciler) ObserveSinkHPAV2Beta2(ctx context.Context, sink *v1alpha1.Sink) error {
 	if sink.Spec.MaxReplicas == nil {
 		// HPA not enabled, skip further action
-		delete(sink.Status.Conditions, v1alpha1.HPA)
 		return nil
 	}
 
@@ -293,12 +307,7 @@ func (r *SinkReconciler) ObserveSinkHPAV2Beta2(ctx context.Context, sink *v1alph
 
 func (r *SinkReconciler) ApplySinkHPAV2Beta2(ctx context.Context, sink *v1alpha1.Sink, newGeneration bool) error {
 	if sink.Spec.MaxReplicas == nil {
-		// HPA not enabled, delete HPA if it exists
-		err := deleteHPAV2Beta2(ctx, r.Client, types.NamespacedName{Namespace: sink.Namespace, Name: sink.Name})
-		if err != nil {
-			r.Log.Error(err, "failed to delete HPA for sink", "namespace", sink.Namespace, "name", sink.Name)
-			return err
-		}
+		// HPA not enabled, skip further action
 		return nil
 	}
 	condition := sink.Status.Conditions[v1alpha1.HPA]
@@ -352,7 +361,7 @@ func (r *SinkReconciler) ApplySinkVPA(ctx context.Context, sink *v1alpha1.Sink) 
 func (r *SinkReconciler) ApplySinkCleanUpJob(ctx context.Context, sink *v1alpha1.Sink) error {
 	if !spec.NeedCleanup(sink) {
 		desiredJob := spec.MakeSinkCleanUpJob(sink)
-		if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+		if err := r.Delete(ctx, desiredJob); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
 			}
@@ -396,7 +405,7 @@ func (r *SinkReconciler) ApplySinkCleanUpJob(ctx context.Context, sink *v1alpha1
 				}
 			} else {
 				// delete the cleanup job
-				if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+				if err := r.Delete(ctx, desiredJob); err != nil {
 					return err
 				}
 			}
@@ -411,7 +420,7 @@ func (r *SinkReconciler) ApplySinkCleanUpJob(ctx context.Context, sink *v1alpha1
 
 			desiredJob := spec.MakeSinkCleanUpJob(sink)
 			// delete the cleanup job
-			if err := r.Delete(ctx, desiredJob, getBackgroundDeletionPolicy()); err != nil {
+			if err := r.Delete(ctx, desiredJob); err != nil {
 				return err
 			}
 
@@ -420,20 +429,8 @@ func (r *SinkReconciler) ApplySinkCleanUpJob(ctx context.Context, sink *v1alpha1
 	return nil
 }
 
-func (r *SinkReconciler) checkIfStatefulSetNeedUpdate(ctx context.Context, statefulSet *appsv1.StatefulSet, sink *v1alpha1.Sink) (bool, error) {
-	desiredStatefulSet, err := spec.MakeSinkStatefulSet(ctx, r.Client, sink)
-	if err != nil {
-		return false, err
-	}
-	needUpdate := !spec.CheckIfStatefulSetSpecIsEqual(&statefulSet.Spec, &desiredStatefulSet.Spec)
-	if needUpdate {
-		diff, err := spec.CreateDiff(statefulSet, desiredStatefulSet)
-		if err != nil {
-			return needUpdate, err
-		}
-		sink.Status.PendingChange = diff
-	}
-	return needUpdate, nil
+func (r *SinkReconciler) checkIfStatefulSetNeedUpdate(statefulSet *appsv1.StatefulSet, sink *v1alpha1.Sink) bool {
+	return !spec.CheckIfStatefulSetSpecIsEqual(&statefulSet.Spec, &spec.MakeSinkStatefulSet(sink).Spec)
 }
 
 func (r *SinkReconciler) checkIfHPANeedUpdate(hpa *autov2.HorizontalPodAutoscaler, sink *v1alpha1.Sink) bool {

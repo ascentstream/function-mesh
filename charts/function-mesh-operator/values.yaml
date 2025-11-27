@@ -11,7 +11,7 @@ installation:
   namespace: function-mesh-system
 
 # operatorImage is Function Mesh Operator image
-operatorImage: streamnative/function-mesh:v0.25.1
+operatorImage: streamnative/function-mesh:v0.17.0
 imagePullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -63,18 +63,13 @@ controllerManager:
   configFile: /etc/config/config.yaml
   enableLeaderElection: true
   metrics:
-    port: 8443
-    scheme: https
+    port: 8080
   healthProbe:
     port: 8000
   pprof:
     enable: false
     port: 8090
   enableInitContainers: false
-  globalBackendConfig: global-backend-config
-  globalBackendConfigNamespace: default
-  namespacedBackendConfig: backend-config
-  addDefaultAffinity: true
 
 admissionWebhook:
   enabled: true

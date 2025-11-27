@@ -66,12 +66,16 @@ type PulsarMessaging struct {
 	CleanupAuthConfig *AuthConfig `json:"cleanupAuthConfig,omitempty"`
 }
 
-type PulsarTLSConfig struct {
+type TLSConfig struct {
 	Enabled              bool   `json:"enabled,omitempty"`
 	AllowInsecure        bool   `json:"allowInsecure,omitempty"`
 	HostnameVerification bool   `json:"hostnameVerification,omitempty"`
 	CertSecretName       string `json:"certSecretName,omitempty"`
 	CertSecretKey        string `json:"certSecretKey,omitempty"`
+}
+
+type PulsarTLSConfig struct {
+	TLSConfig `json:",inline"`
 }
 
 func (c *PulsarTLSConfig) IsEnabled() bool {
@@ -127,7 +131,7 @@ func (o *OAuth2Config) GetMountFile() string {
 }
 
 func (o *OAuth2Config) AuthenticationParameters() string {
-	return fmt.Sprintf(`'{"credentials_url":"file://%s","privateKey":"%s","private_key":"%s","issuerUrl":"%s","issuer_url":"%s","audience":"%s","scope":"%s"}'`, o.GetMountFile(), o.GetMountFile(), o.GetMountFile(), o.IssuerURL, o.IssuerURL, o.Audience, o.Scope)
+	return fmt.Sprintf(`'{"privateKey":"%s","private_key":"%s","issuerUrl":"%s","issuer_url":"%s","audience":"%s","scope":"%s"}'`, o.GetMountFile(), o.GetMountFile(), o.IssuerURL, o.IssuerURL, o.Audience, o.Scope)
 }
 
 type GenericAuth struct {
@@ -177,7 +181,7 @@ type PodPolicy struct {
 
 	// TerminationGracePeriodSeconds is the amount of time that kubernetes will give
 	// for a pod before terminating it.
-	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+	TerminationGracePeriodSeconds int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// List of volumes that can be mounted by containers belonging to the pod.
 	// More info: https://kubernetes.io/docs/concepts/storage/volumes
@@ -227,15 +231,12 @@ type PodPolicy struct {
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	Liveness *Liveness `json:"liveness,omitempty"`
-
-	DisableDefaultAffinity bool `json:"disableDefaultAffinity,omitempty"`
 }
 
 type Runtime struct {
-	Java           *JavaRuntime    `json:"java,omitempty"`
-	Python         *PythonRuntime  `json:"python,omitempty"`
-	Golang         *GoRuntime      `json:"golang,omitempty"`
-	GenericRuntime *GenericRuntime `json:"genericRuntime,omitempty"`
+	Java   *JavaRuntime   `json:"java,omitempty"`
+	Python *PythonRuntime `json:"python,omitempty"`
+	Golang *GoRuntime     `json:"golang,omitempty"`
 }
 
 // JavaRuntime contains the java runtime configs
@@ -247,8 +248,6 @@ type JavaRuntime struct {
 	ExtraDependenciesDir string            `json:"extraDependenciesDir,omitempty"`
 	Log                  *RuntimeLogConfig `json:"log,omitempty"`
 	JavaOpts             []string          `json:"javaOpts,omitempty"`
-	InstancePath         *string           `json:"instancePath,omitempty"`
-	EntryClass           *string           `json:"entryClass,omitempty"`
 }
 
 // PythonRuntime contains the python runtime configs
@@ -267,16 +266,6 @@ type GoRuntime struct {
 	Go         string            `json:"go"`
 	GoLocation string            `json:"goLocation,omitempty"`
 	Log        *RuntimeLogConfig `json:"log,omitempty"`
-}
-
-// GenericRuntime contains the generic runtime configs
-// +kubebuilder:validation:Optional
-type GenericRuntime struct {
-	// +kubebuilder:validation:Required
-	FunctionFile string `json:"functionFile"`
-	// +kubebuilder:validation:Required
-	Language             string `json:"language"`
-	FunctionFileLocation string `json:"functionFileLocation,omitempty"`
 }
 
 type SecretRef struct {
@@ -411,10 +400,6 @@ const (
 	Manual          ProcessGuarantee = "manual"
 )
 
-// WindowProcessGuarantee enum type
-// +kubebuilder:validation:Enum=ATLEAST_ONCE;ATMOST_ONCE
-type WindowProcessGuarantee string
-
 // LogTopicAgent enum type
 // +kubebuilder:validation:Enum=runtime;sidecar
 type LogTopicAgent string
@@ -541,16 +526,15 @@ type LogConfig struct {
 }
 
 type WindowConfig struct {
-	ActualWindowFunctionClassName string                 `json:"actualWindowFunctionClassName"`
-	WindowLengthCount             *int32                 `json:"windowLengthCount,omitempty"`
-	WindowLengthDurationMs        *int64                 `json:"windowLengthDurationMs,omitempty"`
-	SlidingIntervalCount          *int32                 `json:"slidingIntervalCount,omitempty"`
-	SlidingIntervalDurationMs     *int64                 `json:"slidingIntervalDurationMs,omitempty"`
-	LateDataTopic                 string                 `json:"lateDataTopic,omitempty"`
-	MaxLagMs                      *int64                 `json:"maxLagMs,omitempty"`
-	WatermarkEmitIntervalMs       *int64                 `json:"watermarkEmitIntervalMs,omitempty"`
-	TimestampExtractorClassName   *string                `json:"timestampExtractorClassName,omitempty"`
-	ProcessingGuarantees          WindowProcessGuarantee `json:"processingGuarantees,omitempty"`
+	ActualWindowFunctionClassName string  `json:"actualWindowFunctionClassName"`
+	WindowLengthCount             *int32  `json:"windowLengthCount,omitempty"`
+	WindowLengthDurationMs        *int64  `json:"windowLengthDurationMs,omitempty"`
+	SlidingIntervalCount          *int32  `json:"slidingIntervalCount,omitempty"`
+	SlidingIntervalDurationMs     *int64  `json:"slidingIntervalDurationMs,omitempty"`
+	LateDataTopic                 string  `json:"lateDataTopic,omitempty"`
+	MaxLagMs                      *int64  `json:"maxLagMs,omitempty"`
+	WatermarkEmitIntervalMs       *int64  `json:"watermarkEmitIntervalMs,omitempty"`
+	TimestampExtractorClassName   *string `json:"timestampExtractorClassName,omitempty"`
 }
 
 type VPASpec struct {

@@ -20,6 +20,11 @@ package spec
 import (
 	"bytes"
 	"context"
+	"regexp"
+
+	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
+
+	// used for template
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -27,23 +32,17 @@ import (
 	"html/template"
 	"os"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
-	pctlutil "github.com/apache/pulsar-client-go/pulsaradmin/pkg/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	autov2 "k8s.io/api/autoscaling/v2"
-	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	v1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
@@ -52,26 +51,22 @@ import (
 	"github.com/streamnative/function-mesh/api/compute/v1alpha1"
 	"github.com/streamnative/function-mesh/controllers/proto"
 	"github.com/streamnative/function-mesh/utils"
+	pctlutil "github.com/streamnative/pulsarctl/pkg/pulsar/utils"
 )
 
 const (
-	EnvShardID                      = "SHARD_ID"
-	FunctionsInstanceClasspath      = "pulsar.functions.instance.classpath"
-	DefaultRunnerTag                = "2.10.0.0-rc10"
-	DefaultGenericRunnerTag         = "0.1.0"
-	DefaultRunnerPrefix             = "streamnative/"
-	DefaultRunnerImage              = DefaultRunnerPrefix + "pulsar-all:" + DefaultRunnerTag
-	DefaultJavaRunnerImage          = DefaultRunnerPrefix + "pulsar-functions-java-runner:" + DefaultRunnerTag
-	DefaultPythonRunnerImage        = DefaultRunnerPrefix + "pulsar-functions-python-runner:" + DefaultRunnerTag
-	DefaultGoRunnerImage            = DefaultRunnerPrefix + "pulsar-functions-go-runner:" + DefaultRunnerTag
-	DefaultGenericNodejsRunnerImage = DefaultRunnerPrefix + "pulsar-functions-generic-nodejs-runner:" + DefaultGenericRunnerTag
-	DefaultGenericPythonRunnerImage = DefaultRunnerPrefix + "pulsar-functions-generic-python-runner:" + DefaultGenericRunnerTag
-	DefaultGenericRunnerImage       = DefaultRunnerPrefix + "pulsar-functions-generic-base-runner:" + DefaultGenericRunnerTag
-	PulsarAdminExecutableFile       = "/pulsar/bin/pulsar-admin"
-	WorkDir                         = "/pulsar/"
-	DefaultConnectorsDirectory      = WorkDir + "connectors"
+	EnvShardID                 = "SHARD_ID"
+	FunctionsInstanceClasspath = "pulsar.functions.instance.classpath"
+	DefaultRunnerTag           = "2.10.0.0-rc10"
+	DefaultRunnerPrefix        = "streamnative/"
+	DefaultRunnerImage         = DefaultRunnerPrefix + "pulsar-all:" + DefaultRunnerTag
+	DefaultJavaRunnerImage     = DefaultRunnerPrefix + "pulsar-functions-java-runner:" + DefaultRunnerTag
+	DefaultPythonRunnerImage   = DefaultRunnerPrefix + "pulsar-functions-python-runner:" + DefaultRunnerTag
+	DefaultGoRunnerImage       = DefaultRunnerPrefix + "pulsar-functions-go-runner:" + DefaultRunnerTag
+	PulsarAdminExecutableFile  = "/pulsar/bin/pulsar-admin"
+	WorkDir                    = "/pulsar/"
 
-	RunnerImageHasPulsarctl = "pulsar-functions-(pulsarctl|sn|generic)-(java|python|go|nodejs|base)-runner"
+	RunnerImageHasPulsarctl = "pulsar-functions-(pulsarctl|sn)-(java|python|go)-runner"
 
 	PulsarctlExecutableFile = "pulsarctl"
 	DownloaderName          = "downloader"
@@ -102,7 +97,6 @@ const (
 	AnnotationPrometheusScrape = "prometheus.io/scrape"
 	AnnotationPrometheusPort   = "prometheus.io/port"
 	AnnotationManaged          = "compute.functionmesh.io/managed"
-	AnnotationPauseRollout     = "compute.functionmesh.io/pause-rollout"
 	AnnotationNeedCleanup      = "compute.functionmesh.io/need-cleanup"
 
 	// if labels contains below, we think it comes from function-mesh-worker-service
@@ -127,16 +121,9 @@ const (
 	DefaultPythonLogConfigPath   = PythonLogConifgDirectory + PythonLogConfigFile
 
 	DefaultFilebeatConfig = "/usr/share/filebeat/config/filebeat.yaml"
-	DefaultFilebeatImage  = "streamnative/filebeat:v0.6.0"
+	DefaultFilebeatImage  = "streamnative/filebeat:v0.6.0-rc7"
 
 	EnvGoFunctionLogLevel = "LOGGING_LEVEL"
-
-	FunctionContainerName = "pulsar-function"
-	SinkContainerName     = "pulsar-sink"
-	SourceContainerName   = "pulsar-source"
-
-	DefaultPulsarFunctionsJavaInstancePath       = "/pulsar/instances/java-instance.jar"
-	DefaultPulsarFunctionsJavaInstanceEntryClass = "org.apache.pulsar.functions.instance.JavaInstanceMain"
 )
 
 //go:embed template/java-runtime-log4j.xml.tmpl
@@ -173,33 +160,9 @@ type TLSConfig interface {
 	GetMountPath() string
 }
 
-type RollingCfg struct {
-	Enabled bool
-	Type    string // "size" or "time"
-	File    string
-	// size-based
-	MaxBytes int
-	Backups  int
-	// time-based
-	When     string // e.g. "D", "W0"
-	Interval int
-}
-
-type LogCfg struct {
-	Level    string // INFO/DEBUG/...
-	Format   string // "json" or "text"
-	Handlers string // computed: "stream_handler[,rotating_file_handler|,timed_rotating_file_handler]"
-	Rolling  RollingCfg
-}
-
 func IsManaged(object metav1.Object) bool {
 	managed, exists := object.GetAnnotations()[AnnotationManaged]
 	return !exists || managed != "false"
-}
-
-func IsPauseRollout(object metav1.Object) bool {
-	pauseRollout, exists := object.GetAnnotations()[AnnotationPauseRollout]
-	return exists && pauseRollout == "true"
 }
 
 func NeedCleanup(object metav1.Object) bool {
@@ -238,14 +201,13 @@ func MakeHeadlessServiceName(serviceName string) string {
 	return fmt.Sprintf("%s-headless", serviceName)
 }
 
-func MakeStatefulSet(objectMeta *metav1.ObjectMeta, replicas *int32, downloaderImage string, container *corev1.Container,
-	volumes []corev1.Volume, labels map[string]string, policy v1alpha1.PodPolicy, authConfig *v1alpha1.AuthConfig,
-	tlsConfig TLSConfig, pulsarConfig, authSecret, tlsSecret string, javaRuntime *v1alpha1.JavaRuntime,
-	pythonRuntime *v1alpha1.PythonRuntime, goRuntime *v1alpha1.GoRuntime, env []corev1.EnvVar, logTopic, filebeatImage string,
-	logTopicAgent v1alpha1.LogTopicAgent, definedVolumeMounts []corev1.VolumeMount, volumeClaimTemplates []corev1.PersistentVolumeClaim,
+func MakeStatefulSet(objectMeta *metav1.ObjectMeta, replicas *int32, downloaderImage string,
+	container *corev1.Container, filebeatContainer *corev1.Container,
+	volumes []corev1.Volume, labels map[string]string, policy v1alpha1.PodPolicy, pulsar v1alpha1.PulsarMessaging,
+	javaRuntime *v1alpha1.JavaRuntime, pythonRuntime *v1alpha1.PythonRuntime,
+	goRuntime *v1alpha1.GoRuntime, definedVolumeMounts []corev1.VolumeMount,
+	volumeClaimTemplates []corev1.PersistentVolumeClaim,
 	persistentVolumeClaimRetentionPolicy *appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy) *appsv1.StatefulSet {
-
-	filebeatContainer := makeFilebeatContainer(definedVolumeMounts, env, logTopic, logTopicAgent, tlsConfig, authConfig, pulsarConfig, tlsSecret, authSecret, filebeatImage)
 
 	volumeMounts := generateDownloaderVolumeMountsForDownloader(javaRuntime, pythonRuntime, goRuntime)
 	var downloaderContainer *corev1.Container
@@ -266,12 +228,12 @@ func MakeStatefulSet(objectMeta *metav1.ObjectMeta, replicas *int32, downloaderI
 
 		// mount auth and tls related VolumeMounts when download package from pulsar
 		if !hasHTTPPrefix(downloadPath) {
-			if authConfig != nil && authConfig.OAuth2Config != nil {
-				volumeMounts = append(volumeMounts, generateVolumeMountFromOAuth2Config(authConfig.OAuth2Config))
+			if pulsar.AuthConfig != nil && pulsar.AuthConfig.OAuth2Config != nil {
+				volumeMounts = append(volumeMounts, generateVolumeMountFromOAuth2Config(pulsar.AuthConfig.OAuth2Config))
 			}
 
-			if !reflect.ValueOf(tlsConfig).IsNil() && tlsConfig.HasSecretVolume() {
-				volumeMounts = append(volumeMounts, generateVolumeMountFromTLSConfig(tlsConfig))
+			if !reflect.ValueOf(pulsar.TLSConfig).IsNil() && pulsar.TLSConfig.HasSecretVolume() {
+				volumeMounts = append(volumeMounts, generateVolumeMountFromTLSConfig(pulsar.TLSConfig))
 			}
 		}
 		volumeMounts = append(volumeMounts, definedVolumeMounts...)
@@ -287,15 +249,15 @@ func MakeStatefulSet(objectMeta *metav1.ObjectMeta, replicas *int32, downloaderI
 			Name:  DownloaderName,
 			Image: image,
 			Command: []string{"sh", "-c",
-				strings.Join(GetDownloadCommand(downloadPath, componentPackage, true, true,
-					authSecret != "", tlsSecret != "", tlsConfig, authConfig), " ")},
+				strings.Join(getDownloadCommand(downloadPath, componentPackage, true, true,
+					pulsar.AuthSecret != "", pulsar.TLSSecret != "", pulsar.TLSConfig, pulsar.AuthConfig), " ")},
 			VolumeMounts:    volumeMounts,
 			ImagePullPolicy: corev1.PullIfNotPresent,
 			Env: []corev1.EnvVar{{
 				Name:  "HOME",
 				Value: "/tmp",
 			}},
-			EnvFrom: GenerateContainerEnvFrom(pulsarConfig, authSecret, tlsSecret),
+			EnvFrom: generateContainerEnvFrom(pulsar.PulsarConfig, pulsar.AuthSecret, pulsar.TLSSecret),
 		}
 		podVolumes = append(podVolumes, corev1.Volume{
 			Name: DownloaderVolume,
@@ -311,138 +273,6 @@ func MakeStatefulSet(objectMeta *metav1.ObjectMeta, replicas *int32, downloaderI
 			MakeHeadlessServiceName(objectMeta.Name), downloaderContainer, volumeClaimTemplates,
 			persistentVolumeClaimRetentionPolicy),
 	}
-}
-
-// PatchStatefulSet Apply global and namespaced configs to StatefulSet
-func PatchStatefulSet(ctx context.Context, cli client.Client, namespace string, statefulSet *appsv1.StatefulSet) (string, string, error) {
-	globalBackendConfigVersion := ""
-	namespacedBackendConfigVersion := ""
-	envData := make(map[string]string)
-	var podPolicy *v1alpha1.PodPolicy = nil
-
-	if utils.GlobalBackendConfig != "" && utils.GlobalBackendConfigNamespace != "" {
-		globalBackendConfig := &v1alpha1.BackendConfig{}
-		err := cli.Get(ctx, types.NamespacedName{
-			Namespace: utils.GlobalBackendConfigNamespace,
-			Name:      utils.GlobalBackendConfig,
-		}, globalBackendConfig)
-		if err != nil {
-			// ignore not found error
-			if !k8serrors.IsNotFound(err) {
-				return "", "", err
-			}
-		} else {
-			globalBackendConfigVersion = globalBackendConfig.ResourceVersion
-			for key, val := range globalBackendConfig.Spec.Env {
-				envData[key] = val
-			}
-			if globalBackendConfig.Spec.Pod != nil {
-				podPolicy = globalBackendConfig.Spec.Pod
-			}
-		}
-	}
-
-	// patch namespaced configs
-	if utils.NamespacedBackendConfig != "" {
-		namespacedBackendConfig := &v1alpha1.BackendConfig{}
-		err := cli.Get(ctx, types.NamespacedName{
-			Namespace: namespace,
-			Name:      utils.NamespacedBackendConfig,
-		}, namespacedBackendConfig)
-		if err != nil {
-			// ignore not found error
-			if !k8serrors.IsNotFound(err) {
-				return "", "", err
-			}
-		} else {
-			namespacedBackendConfigVersion = namespacedBackendConfig.ResourceVersion
-			for key, val := range namespacedBackendConfig.Spec.Env {
-				envData[key] = val
-			}
-			if namespacedBackendConfig.Spec.Pod != nil {
-				podPolicy = mergePodPolicy(podPolicy, namespacedBackendConfig.Spec.Pod)
-			}
-		}
-	}
-
-	// merge env
-	globalEnvs := []corev1.EnvVar{}
-	for key, val := range envData {
-		globalEnvs = append(globalEnvs, corev1.EnvVar{
-			Name:  key,
-			Value: val,
-		})
-	}
-	for i := range statefulSet.Spec.Template.Spec.Containers {
-		container := &statefulSet.Spec.Template.Spec.Containers[i]
-		if len(globalEnvs) > 0 {
-			container.Env = append(globalEnvs, container.Env...)
-		}
-
-		// configs which only work for the workload container
-		switch container.Name {
-		case FunctionContainerName, SinkContainerName, SourceContainerName:
-			// set liveness probe if it's not set
-			if container.LivenessProbe == nil && podPolicy != nil && podPolicy.Liveness != nil {
-				container.LivenessProbe = MakeLivenessProbe(podPolicy.Liveness)
-			}
-		default:
-			// No action needed for other containers
-		}
-	}
-
-	// overwrite the statefulset
-	if podPolicy != nil {
-		statefulSet.Spec.Template.Labels = mergeMaps(podPolicy.Labels, statefulSet.Spec.Template.Labels)
-		statefulSet.Spec.Template.Spec.NodeSelector = mergeMaps(podPolicy.NodeSelector, statefulSet.Spec.Template.Spec.NodeSelector)
-		if statefulSet.Spec.Template.Spec.Affinity == nil {
-			statefulSet.Spec.Template.Spec.Affinity = podPolicy.Affinity
-		}
-		statefulSet.Spec.Template.Spec.Tolerations = append(podPolicy.Tolerations, statefulSet.Spec.Template.Spec.Tolerations...)
-		statefulSet.Spec.Template.Annotations = mergeMaps(podPolicy.Annotations, statefulSet.Spec.Template.Annotations)
-		if statefulSet.Spec.Template.Spec.SecurityContext == nil {
-			statefulSet.Spec.Template.Spec.SecurityContext = podPolicy.SecurityContext
-		}
-		if statefulSet.Spec.Template.Spec.TerminationGracePeriodSeconds == nil {
-			statefulSet.Spec.Template.Spec.TerminationGracePeriodSeconds = podPolicy.TerminationGracePeriodSeconds
-		}
-		statefulSet.Spec.Template.Spec.ImagePullSecrets = append(podPolicy.ImagePullSecrets, statefulSet.Spec.Template.Spec.ImagePullSecrets...)
-		if statefulSet.Spec.Template.Spec.ServiceAccountName == "" {
-			statefulSet.Spec.Template.Spec.ServiceAccountName = podPolicy.ServiceAccountName
-		}
-	}
-
-	return globalBackendConfigVersion, namespacedBackendConfigVersion, nil
-}
-
-func mergePodPolicy(sourcePolicy *v1alpha1.PodPolicy, targetPolicy *v1alpha1.PodPolicy) *v1alpha1.PodPolicy {
-	if sourcePolicy == nil {
-		return targetPolicy
-	}
-	if targetPolicy == nil {
-		return sourcePolicy
-	}
-	sourcePolicy.Labels = mergeMaps(sourcePolicy.Labels, targetPolicy.Labels)
-	sourcePolicy.NodeSelector = mergeMaps(sourcePolicy.NodeSelector, targetPolicy.NodeSelector)
-	if targetPolicy.Affinity != nil {
-		sourcePolicy.Affinity = targetPolicy.Affinity
-	}
-	sourcePolicy.Tolerations = append(sourcePolicy.Tolerations, targetPolicy.Tolerations...)
-	sourcePolicy.Annotations = mergeMaps(sourcePolicy.Annotations, targetPolicy.Annotations)
-	if targetPolicy.SecurityContext != nil {
-		sourcePolicy.SecurityContext = targetPolicy.SecurityContext
-	}
-	if targetPolicy.TerminationGracePeriodSeconds != nil {
-		sourcePolicy.TerminationGracePeriodSeconds = targetPolicy.TerminationGracePeriodSeconds
-	}
-	sourcePolicy.ImagePullSecrets = append(sourcePolicy.ImagePullSecrets, targetPolicy.ImagePullSecrets...)
-	if targetPolicy.ServiceAccountName != "" {
-		sourcePolicy.ServiceAccountName = targetPolicy.ServiceAccountName
-	}
-	if targetPolicy.Liveness != nil {
-		sourcePolicy.Liveness = targetPolicy.Liveness
-	}
-	return sourcePolicy
 }
 
 func MakeStatefulSetSpec(replicas *int32, container *corev1.Container, filebeatContainer *corev1.Container,
@@ -486,19 +316,18 @@ func makePodTemplate(container *corev1.Container, filebeatContainer *corev1.Cont
 	if filebeatContainer != nil {
 		containers = append(containers, *filebeatContainer)
 	}
-	mergedLabels := mergeMaps(labels, Configs.ResourceLabels, policy.Labels)
 	return &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels:      mergedLabels,
+			Labels:      mergeLabels(labels, Configs.ResourceLabels, policy.Labels),
 			Annotations: generateAnnotations(Configs.ResourceAnnotations, policy.Annotations),
 		},
 		Spec: corev1.PodSpec{
 			InitContainers:                initContainers,
 			Containers:                    containers,
-			TerminationGracePeriodSeconds: policy.TerminationGracePeriodSeconds,
+			TerminationGracePeriodSeconds: &policy.TerminationGracePeriodSeconds,
 			Volumes:                       volumes,
 			NodeSelector:                  policy.NodeSelector,
-			Affinity:                      GenerateAffinity(policy.Affinity, mergedLabels, policy.DisableDefaultAffinity),
+			Affinity:                      policy.Affinity,
 			Tolerations:                   policy.Tolerations,
 			SecurityContext:               podSecurityContext,
 			ImagePullSecrets:              policy.ImagePullSecrets,
@@ -507,52 +336,22 @@ func makePodTemplate(container *corev1.Container, filebeatContainer *corev1.Cont
 	}
 }
 
-func GenerateAffinity(affinity *corev1.Affinity, labels map[string]string, disableDefaultAffinity bool) *corev1.Affinity {
-	if !utils.AddDefaultAffinity || disableDefaultAffinity {
-		return affinity
-	}
-	if affinity == nil {
-		affinity = &corev1.Affinity{}
-	}
-	if affinity.PodAntiAffinity == nil {
-		affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
-	}
-
-	// add default pod anti-affinity rules to ensure replica pods prefer running on different node
-	if affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution == nil {
-		affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = []corev1.WeightedPodAffinityTerm{}
-	}
-	affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
-		affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
-		corev1.WeightedPodAffinityTerm{
-			Weight: 100,
-			PodAffinityTerm: corev1.PodAffinityTerm{
-				LabelSelector: &metav1.LabelSelector{
-					MatchLabels: labels,
-				},
-				TopologyKey: "kubernetes.io/hostname",
-			},
-		},
-	)
-	return affinity
-}
-
-func MakeJavaFunctionCommand(downloadPath, packageFile, name, clusterName, generateLogConfigCommand, logLevel, details, extraDependenciesDir, connectorsDirectory, uid string,
-	memory *resource.Quantity, javaOpts []string, hasPulsarctl, hasWget, authProvided, tlsProvided bool, secretMaps map[string]v1alpha1.SecretRef,
+func MakeJavaFunctionCommand(downloadPath, packageFile, name, clusterName, generateLogConfigCommand, logLevel, details, memory, extraDependenciesDir, uid string,
+	javaOpts []string, hasPulsarctl, hasWget, authProvided, tlsProvided bool, secretMaps map[string]v1alpha1.SecretRef,
 	state *v1alpha1.Stateful,
 	tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig,
-	maxPendingAsyncRequests *int32, logConfigFileName, instancePath, entryClass string) []string {
+	maxPendingAsyncRequests *int32, logConfigFileName string) []string {
 	processCommand := setShardIDEnvironmentVariableCommand() + " && " + generateLogConfigCommand +
 		strings.Join(getProcessJavaRuntimeArgs(name, packageFile, clusterName, logLevel, details,
-			extraDependenciesDir, connectorsDirectory, uid, memory, javaOpts, authProvided, tlsProvided, secretMaps, state, tlsConfig,
-			authConfig, maxPendingAsyncRequests, logConfigFileName, instancePath, entryClass), " ")
+			memory, extraDependenciesDir, uid, javaOpts, authProvided, tlsProvided, secretMaps, state, tlsConfig,
+			authConfig, maxPendingAsyncRequests, logConfigFileName), " ")
 	if downloadPath != "" && !utils.EnableInitContainers {
 		// prepend download command if the downPath is provided
-		downloadCommand := strings.Join(GetDownloadCommand(downloadPath, packageFile, hasPulsarctl, hasWget,
+		downloadCommand := strings.Join(getDownloadCommand(downloadPath, packageFile, hasPulsarctl, hasWget,
 			authProvided, tlsProvided, tlsConfig, authConfig), " ")
 		processCommand = downloadCommand + " && " + processCommand
 	}
-	return []string{"bash", "-c", processCommand}
+	return []string{"sh", "-c", processCommand}
 }
 
 func MakePythonFunctionCommand(downloadPath, packageFile, name, clusterName, generateLogConfigCommand, details, uid string,
@@ -564,12 +363,12 @@ func MakePythonFunctionCommand(downloadPath, packageFile, name, clusterName, gen
 			details, uid, authProvided, tlsProvided, secretMaps, state, tlsConfig, authConfig), " ")
 	if downloadPath != "" && !utils.EnableInitContainers {
 		// prepend download command if the downPath is provided
-		downloadCommand := strings.Join(GetDownloadCommand(downloadPath, packageFile, hasPulsarctl, hasWget,
+		downloadCommand := strings.Join(getDownloadCommand(downloadPath, packageFile, hasPulsarctl, hasWget,
 			authProvided,
 			tlsProvided, tlsConfig, authConfig), " ")
 		processCommand = downloadCommand + " && " + processCommand
 	}
-	return []string{"bash", "-c", processCommand}
+	return []string{"sh", "-c", processCommand}
 }
 
 func MakeGoFunctionCommand(downloadPath, goExecFilePath string, function *v1alpha1.Function) []string {
@@ -583,26 +382,10 @@ func MakeGoFunctionCommand(downloadPath, goExecFilePath string, function *v1alph
 			hasPulsarctl = true
 			hasWget = true
 		}
-		downloadCommand := strings.Join(GetDownloadCommand(downloadPath, goExecFilePath,
+		downloadCommand := strings.Join(getDownloadCommand(downloadPath, goExecFilePath,
 			hasPulsarctl, hasWget, function.Spec.Pulsar.AuthSecret != "",
 			function.Spec.Pulsar.TLSSecret != "", function.Spec.Pulsar.TLSConfig, function.Spec.Pulsar.AuthConfig), " ")
 		processCommand = downloadCommand + " && ls -al && pwd &&" + processCommand
-	}
-	return []string{"bash", "-c", processCommand}
-}
-
-func MakeGenericFunctionCommand(downloadPath, functionFile, language, clusterName, details, uid string, authProvided, tlsProvided bool, secretMaps map[string]v1alpha1.SecretRef,
-	state *v1alpha1.Stateful,
-	tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig) []string {
-	processCommand := setShardIDEnvironmentVariableCommand() + " && " +
-		strings.Join(getProcessGenericRuntimeArgs(language, functionFile, clusterName,
-			details, uid, authProvided, tlsProvided, secretMaps, state, tlsConfig, authConfig), " ")
-	if downloadPath != "" && !utils.EnableInitContainers {
-		// prepend download command if the downPath is provided
-		downloadCommand := strings.Join(GetDownloadCommand(downloadPath, functionFile, true, true,
-			authProvided,
-			tlsProvided, tlsConfig, authConfig), " ")
-		processCommand = downloadCommand + " && " + processCommand
 	}
 	return []string{"sh", "-c", processCommand}
 }
@@ -618,9 +401,8 @@ func MakeLivenessProbe(liveness *v1alpha1.Liveness) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
-				Path:   "/",
-				Port:   intstr.FromInt32(MetricsPort.ContainerPort),
-				Scheme: corev1.URISchemeHTTP,
+				Path: "/",
+				Port: intstr.FromInt(int(MetricsPort.ContainerPort)),
 			},
 		},
 		InitialDelaySeconds: initialDelay,
@@ -673,7 +455,7 @@ func TriggerCleanup(ctx context.Context, k8sclient client.Client, restClient res
 	if err != nil {
 		return err
 	}
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+	err = executor.Stream(remotecommand.StreamOptions{
 		Stdin:  nil,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
@@ -922,7 +704,7 @@ func getCleanUpCommand(hasPulsarctl, authProvided, tlsProvided bool, tlsConfig T
 			" ")}
 }
 
-func GetDownloadCommand(downloadPath, componentPackage string, hasPulsarctl, hasWget, authProvided, tlsProvided bool,
+func getDownloadCommand(downloadPath, componentPackage string, hasPulsarctl, hasWget, authProvided, tlsProvided bool,
 	tlsConfig TLSConfig,
 	authConfig *v1alpha1.AuthConfig) []string {
 	var args []string
@@ -956,7 +738,7 @@ func GetDownloadCommand(downloadPath, componentPackage string, hasPulsarctl, has
 	return args
 }
 
-func GenerateJavaLogConfigCommand(runtime *v1alpha1.JavaRuntime, agent v1alpha1.LogTopicAgent) string {
+func generateJavaLogConfigCommand(runtime *v1alpha1.JavaRuntime, agent v1alpha1.LogTopicAgent) string {
 	if runtime == nil || (runtime.Log != nil && runtime.Log.LogConfig != nil) {
 		return ""
 	}
@@ -991,7 +773,10 @@ func GenerateJavaLogConfigCommand(runtime *v1alpha1.JavaRuntime, agent v1alpha1.
 	return ""
 }
 
-func GenerateJavaLogConfigFileName(runtime *v1alpha1.JavaRuntime) string {
+func generateJavaLogConfigFileName(runtime *v1alpha1.JavaRuntime) string {
+	if runtime == nil || (runtime.Log != nil && runtime.Log.LogConfig != nil) {
+		return DefaultJavaLogConfigPath
+	}
 	configFileType := v1alpha1.XML
 	if runtime != nil && runtime.Log != nil && runtime.Log.JavaLog4JConfigFileType != nil {
 		configFileType = *runtime.Log.JavaLog4JConfigFileType
@@ -1127,89 +912,88 @@ func generatePythonLogConfigCommand(name string, runtime *v1alpha1.PythonRuntime
 
 func renderPythonInstanceLoggingINITemplate(name string, runtime *v1alpha1.PythonRuntime, agent v1alpha1.LogTopicAgent) (string, error) {
 	tmpl := template.Must(template.New("spec").Parse(pythonLoggingINITemplate))
-
-	lc := LogCfg{
-		Level:  "INFO",
-		Format: "text",
-		Rolling: RollingCfg{
-			Enabled: false,
-			Backups: 5,
-		},
+	var tpl bytes.Buffer
+	type logConfig struct {
+		RollingEnabled bool
+		Level          string
+		Policy         template.HTML
+		Handlers       string
+		Format         string
 	}
-
-	// level
+	lc := &logConfig{}
+	lc.Level = "INFO"
+	lc.Format = "text"
+	lc.Handlers = "stream_handler"
 	if runtime.Log != nil && runtime.Log.Level != "" {
 		if level := parsePythonLogLevel(runtime); level != "" {
 			lc.Level = level
 		}
 	}
-	// format
-	if runtime.Log != nil && runtime.Log.Format != nil && strings.ToLower(string(*runtime.Log.Format)) == "json" {
-		lc.Format = "json"
+	if runtime.Log != nil && runtime.Log.Format != nil {
+		lc.Format = string(*runtime.Log.Format)
 	}
-
-	// default handler
-	lc.Handlers = "stream_handler"
-
-	// log file path
-	logFile := fmt.Sprintf("logs/functions/%s.log", name)
-
-	// rolling policy
 	if runtime.Log != nil && runtime.Log.RotatePolicy != nil {
-		lc.Rolling.Enabled = true
+		lc.RollingEnabled = true
+		logFile := fmt.Sprintf("logs/functions/%s-${%s}.log", name, EnvShardID)
 		switch *runtime.Log.RotatePolicy {
-		case v1alpha1.SizedPolicyWith10MB:
-			lc.Rolling.Type = "size"
-			lc.Rolling.File = logFile
-			lc.Rolling.MaxBytes = 10 * 1024 * 1024
-			lc.Handlers = "stream_handler,rotating_file_handler"
-		case v1alpha1.SizedPolicyWith50MB:
-			lc.Rolling.Type = "size"
-			lc.Rolling.File = logFile
-			lc.Rolling.MaxBytes = 50 * 1024 * 1024
-			lc.Handlers = "stream_handler,rotating_file_handler"
-		case v1alpha1.SizedPolicyWith100MB:
-			lc.Rolling.Type = "size"
-			lc.Rolling.File = logFile
-			lc.Rolling.MaxBytes = 100 * 1024 * 1024
-			lc.Handlers = "stream_handler,rotating_file_handler"
 		case v1alpha1.TimedPolicyWithDaily:
-			lc.Rolling.Type = "time"
-			lc.Rolling.File = logFile
-			lc.Rolling.When = "D"
-			lc.Rolling.Interval = 1
 			lc.Handlers = "stream_handler,timed_rotating_file_handler"
+			lc.Policy = template.HTML(fmt.Sprintf(`[handler_timed_rotating_file_handler]
+args=(\"%s\", 'D', 1, 5,)
+class=handlers.TimedRotatingFileHandler
+level=%s 
+formatter=formatter`, logFile, lc.Level))
 		case v1alpha1.TimedPolicyWithWeekly:
-			lc.Rolling.Type = "time"
-			lc.Rolling.File = logFile
-			lc.Rolling.When = "W0" // every monday
-			lc.Rolling.Interval = 1
 			lc.Handlers = "stream_handler,timed_rotating_file_handler"
+			lc.Policy = template.HTML(fmt.Sprintf(`[handler_timed_rotating_file_handler]
+args=(\"%s\", 'W0', 1, 5,)
+class=handlers.TimedRotatingFileHandler
+level=%s
+formatter=formatter`, logFile, lc.Level))
 		case v1alpha1.TimedPolicyWithMonthly:
-			lc.Rolling.Type = "time"
-			lc.Rolling.File = logFile
-			lc.Rolling.When = "D" // day
-			lc.Rolling.Interval = 30
 			lc.Handlers = "stream_handler,timed_rotating_file_handler"
+			lc.Policy = template.HTML(fmt.Sprintf(`[handler_timed_rotating_file_handler]
+args=(\"%s\", 'D', 30, 5,)
+class=handlers.TimedRotatingFileHandler
+level=%s
+formatter=formatter`, logFile, lc.Level))
+		case v1alpha1.SizedPolicyWith10MB:
+			lc.Handlers = "stream_handler,rotating_file_handler"
+			lc.Policy = template.HTML(fmt.Sprintf(`[handler_rotating_file_handler]
+args=(\"%s\", 'a', 10485760, 5,)
+class=handlers.RotatingFileHandler
+level=%s
+formatter=formatter`, logFile, lc.Level))
+		case v1alpha1.SizedPolicyWith50MB:
+			lc.Handlers = "handler_stream_handler,rotating_file_handler"
+			lc.Policy = template.HTML(fmt.Sprintf(`[handler_rotating_file_handler]
+args=(%s, 'a', 52428800, 5,)
+class=handlers.RotatingFileHandler
+level=%s
+formatter=formatter`, logFile, lc.Level))
+		case v1alpha1.SizedPolicyWith100MB:
+			lc.Handlers = "handler_stream_handler,rotating_file_handler"
+			lc.Policy = template.HTML(fmt.Sprintf(`[handler_rotating_file_handler]
+args=(%s, 'a', 104857600, 5,)
+class=handlers.RotatingFileHandler
+level=%s
+formatter=formatter`, logFile, lc.Level))
 		}
-	} else if agent == v1alpha1.SIDECAR {
-		// sidecar mode enables rolling by default, using size policy with 10MB
-		lc.Rolling = RollingCfg{
-			Enabled:  true,
-			Type:     "size",
-			File:     logFile,
-			MaxBytes: 10 * 1024 * 1024,
-			Backups:  5,
-		}
+	} else if agent == v1alpha1.SIDECAR { // sidecar mode needs the rotated log file
+		lc.RollingEnabled = true
+		logFile := fmt.Sprintf("logs/functions/%s-${%s}.log", name, EnvShardID)
 		lc.Handlers = "stream_handler,rotating_file_handler"
+		lc.Policy = template.HTML(fmt.Sprintf(`[handler_rotating_file_handler]
+args=(\"%s\", 'a', 10485760, 5,)
+class=handlers.RotatingFileHandler
+level=%s
+formatter=formatter`, logFile, lc.Level))
 	}
-
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, &lc); err != nil {
+	if err := tmpl.Execute(&tpl, lc); err != nil {
 		log.Error(err, "failed to render python instance logging template")
 		return "", err
 	}
-	return buf.String(), nil
+	return tpl.String(), nil
 }
 
 func parseJavaLogLevel(runtime *v1alpha1.JavaRuntime) string {
@@ -1223,7 +1007,7 @@ func parseJavaLogLevel(runtime *v1alpha1.JavaRuntime) string {
 		v1alpha1.LogLevelFatal: "FATAL",
 		v1alpha1.LogLevelOff:   "OFF",
 	}
-	if runtime.Log != nil && runtime.Log.Level != "" {
+	if runtime.Log != nil && runtime.Log.Level != "" && runtime.Log.LogConfig == nil {
 		if level, exist := levelMap[runtime.Log.Level]; exist {
 			return level
 		}
@@ -1286,12 +1070,12 @@ func setShardIDEnvironmentVariableCommand() string {
 	return fmt.Sprintf("%s=${POD_NAME##*-} && echo shardId=${%s}", EnvShardID, EnvShardID)
 }
 
-func getProcessJavaRuntimeArgs(name, packageName, clusterName, logLevel, details, extraDependenciesDir, connectorsDirectory, uid string,
-	memory *resource.Quantity, javaOpts []string, authProvided, tlsProvided bool, secretMaps map[string]v1alpha1.SecretRef,
+func getProcessJavaRuntimeArgs(name, packageName, clusterName, logLevel, details, memory, extraDependenciesDir, uid string,
+	javaOpts []string, authProvided, tlsProvided bool, secretMaps map[string]v1alpha1.SecretRef,
 	state *v1alpha1.Stateful,
 	tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig,
-	maxPendingAsyncRequests *int32, logConfigFileName, instancePath, entryClass string) []string {
-	classPath := fmt.Sprintf("%s:$(echo /pulsar/lib/com.fasterxml.jackson.dataformat-jackson-dataformat-yaml-*.jar):$(echo /pulsar/lib/org.yaml-snakeyaml-*.jar)", instancePath)
+	maxPendingAsyncRequests *int32, logConfigFileName string) []string {
+	classPath := "/pulsar/instances/java-instance.jar:/pulsar/lib/*"
 	javaLogConfigPath := logConfigFileName
 	if javaLogConfigPath == "" {
 		javaLogConfigPath = DefaultJavaLogConfigPath
@@ -1309,8 +1093,6 @@ func getProcessJavaRuntimeArgs(name, packageName, clusterName, logLevel, details
 			},
 			" ")
 	}
-	// maxDirectMemory takes 20% of the total memory, while MaxRamPercentage is 70%, the rest 10% is for misc usage
-	maxDirectMemory := resource.NewScaledQuantity(memory.Value()/5, 0)
 	args := []string{
 		"exec",
 		"java",
@@ -1320,25 +1102,15 @@ func getProcessJavaRuntimeArgs(name, packageName, clusterName, logLevel, details
 		fmt.Sprintf("-Dlog4j.configurationFile=%s", javaLogConfigPath),
 		"-Dpulsar.function.log.dir=logs/functions",
 		"-Dpulsar.function.log.file=" + fmt.Sprintf("%s-${%s}", name, EnvShardID),
-		"-Dpulsar.allocator.exit_on_oom=true",
 		setLogLevel,
-		"-XX:MaxRAMPercentage=70",
-		"-XX:MaxDirectMemorySize=" + getDecimalSIMemory(maxDirectMemory),
-		"-XX:+UseG1GC",
-		"-XX:+HeapDumpOnOutOfMemoryError",
-		"-XX:HeapDumpPath=/pulsar/tmp/heapdump-%p.hprof",
-		"-XX:+ExitOnOutOfMemoryError",
-		"-Xlog:gc*:file=/pulsar/logs/gc.log:time,level,tags:filecount=5,filesize=10M",
+		"-Xmx" + memory,
 		strings.Join(javaOpts, " "),
-		entryClass,
+		"org.apache.pulsar.functions.instance.JavaInstanceMain",
 		"--jar",
 		packageName,
 	}
 	sharedArgs := getSharedArgs(details, clusterName, uid, authProvided, tlsProvided, tlsConfig, authConfig)
 	args = append(args, sharedArgs...)
-	if connectorsDirectory != "" {
-		args = append(args, "--connectors_directory", connectorsDirectory)
-	}
 	if len(secretMaps) > 0 {
 		secretProviderArgs := getJavaSecretProviderArgs(secretMaps)
 		args = append(args, secretProviderArgs...)
@@ -1397,34 +1169,6 @@ func getProcessPythonRuntimeArgs(name, packageName, clusterName, details, uid st
 	return args
 }
 
-func getProcessGenericRuntimeArgs(language, functionFile, clusterName, details, uid string, authProvided, tlsProvided bool,
-	secretMaps map[string]v1alpha1.SecretRef, state *v1alpha1.Stateful, tlsConfig TLSConfig,
-	authConfig *v1alpha1.AuthConfig) []string {
-
-	args := []string{
-		"exec",
-		"pulsar_rust_instance",
-		"--function_file",
-		functionFile,
-		"--language",
-		language,
-	}
-	sharedArgs := getSharedArgs(details, clusterName, uid, authProvided, tlsProvided, tlsConfig, authConfig)
-	args = append(args, sharedArgs...)
-	if len(secretMaps) > 0 {
-		secretProviderArgs := getGenericSecretProviderArgs(secretMaps, language)
-		args = append(args, secretProviderArgs...)
-	}
-	if state != nil && state.Pulsar != nil && state.Pulsar.ServiceURL != "" {
-		statefulArgs := []string{
-			"--state_storage_serviceurl",
-			state.Pulsar.ServiceURL,
-		}
-		args = append(args, statefulArgs...)
-	}
-	return args
-}
-
 // This method is suitable for Java and Python runtime, not include Go runtime.
 func getSharedArgs(details, clusterName, uid string, authProvided bool, tlsProvided bool,
 	tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig) []string {
@@ -1446,7 +1190,7 @@ func getSharedArgs(details, clusterName, uid string, authProvided bool, tlsProvi
 		"--metrics_port",
 		strconv.Itoa(int(MetricsPort.ContainerPort)),
 		"--expected_healthcheck_interval",
-		"0", // TurnOff BuiltIn HealthCheck to avoid instance exit
+		"-1", // TurnOff BuiltIn HealthCheck to avoid instance exit
 		"--cluster_name",
 		clusterName,
 	}
@@ -1662,15 +1406,12 @@ func generateBasicContainerEnv(secrets map[string]v1alpha1.SecretRef, env []core
 	return vars
 }
 
-func GenerateContainerEnvFrom(messagingConfig string, authSecret string, tlsSecret string) []corev1.EnvFromSource {
-	var envs []corev1.EnvFromSource
-	if messagingConfig != "" {
-		envs = append(envs, corev1.EnvFromSource{
-			ConfigMapRef: &corev1.ConfigMapEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: messagingConfig},
-			},
-		})
-	}
+func generateContainerEnvFrom(messagingConfig string, authSecret string, tlsSecret string) []corev1.EnvFromSource {
+	envs := []corev1.EnvFromSource{{
+		ConfigMapRef: &corev1.ConfigMapEnvSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: messagingConfig},
+		},
+	}}
 
 	if authSecret != "" {
 		envs = append(envs, corev1.EnvFromSource{
@@ -1906,7 +1647,7 @@ func generateDownloaderVolumeMountsForDownloader(javaRuntime *v1alpha1.JavaRunti
 }
 
 func generateDownloaderVolumeMountsForRuntime(javaRuntime *v1alpha1.JavaRuntime, pythonRuntime *v1alpha1.PythonRuntime,
-	goRuntime *v1alpha1.GoRuntime, genericRuntime *v1alpha1.GenericRuntime) []corev1.VolumeMount {
+	goRuntime *v1alpha1.GoRuntime) []corev1.VolumeMount {
 	downloadPath := ""
 	if javaRuntime != nil && javaRuntime.JarLocation != "" {
 		downloadPath = javaRuntime.Jar
@@ -1914,8 +1655,6 @@ func generateDownloaderVolumeMountsForRuntime(javaRuntime *v1alpha1.JavaRuntime,
 		downloadPath = pythonRuntime.Py
 	} else if goRuntime != nil && goRuntime.GoLocation != "" {
 		downloadPath = goRuntime.Go
-	} else if genericRuntime != nil && genericRuntime.FunctionFile != "" {
-		downloadPath = genericRuntime.FunctionFile
 	}
 
 	if downloadPath != "" {
@@ -1937,10 +1676,9 @@ func generateDownloaderVolumeMountsForRuntime(javaRuntime *v1alpha1.JavaRuntime,
 				SubPath:   subPath,
 			}}
 		}
-		idx := strings.LastIndex(mountPath, "/")
 		return []corev1.VolumeMount{{
 			Name:      DownloaderVolume,
-			MountPath: mountPath[:idx],
+			MountPath: mountPath[:len(mountPath)-len(subPath)],
 		}}
 	}
 	return nil
@@ -1958,7 +1696,7 @@ func generateContainerVolumeMountsFromProducerConf(conf *v1alpha1.ProducerConfig
 	return mounts
 }
 
-func GenerateContainerVolumeMounts(volumeMounts []corev1.VolumeMount, producerConf *v1alpha1.ProducerConfig,
+func generateContainerVolumeMounts(volumeMounts []corev1.VolumeMount, producerConf *v1alpha1.ProducerConfig,
 	consumerConfs map[string]v1alpha1.ConsumerConfig, tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig,
 	logConfigs map[int32]*v1alpha1.RuntimeLogConfig, agent v1alpha1.LogTopicAgent) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{}
@@ -1983,7 +1721,7 @@ func GenerateContainerVolumeMounts(volumeMounts []corev1.VolumeMount, producerCo
 	return mounts
 }
 
-func GeneratePodVolumes(podVolumes []corev1.Volume, producerConf *v1alpha1.ProducerConfig,
+func generatePodVolumes(podVolumes []corev1.Volume, producerConf *v1alpha1.ProducerConfig,
 	consumerConfs map[string]v1alpha1.ConsumerConfig, tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig,
 	logConfigs map[int32]*v1alpha1.RuntimeLogConfig,
 	agent v1alpha1.LogTopicAgent) []corev1.Volume {
@@ -2006,7 +1744,7 @@ func GeneratePodVolumes(podVolumes []corev1.Volume, producerConf *v1alpha1.Produ
 	return volumes
 }
 
-func mergeMaps(labels ...map[string]string) map[string]string {
+func mergeLabels(labels ...map[string]string) map[string]string {
 	merged := make(map[string]string)
 
 	for _, m := range labels {
@@ -2035,14 +1773,6 @@ func generateAnnotations(customAnnotations ...map[string]string) map[string]stri
 	return annotations
 }
 
-func getFunctionRunnerImagePullSecret() []map[string]string {
-	return Configs.RunnerImagePullSecrets
-}
-
-func getFunctionRunnerImagePullPolicy() corev1.PullPolicy {
-	return Configs.RunnerImagePullPolicy
-}
-
 func getFunctionRunnerImage(spec *v1alpha1.FunctionSpec) string {
 	runtime := &spec.Runtime
 	img := spec.Image
@@ -2054,18 +1784,8 @@ func getFunctionRunnerImage(spec *v1alpha1.FunctionSpec) string {
 		return Configs.RunnerImages.Python
 	} else if runtime.Golang != nil && runtime.Golang.Go != "" {
 		return Configs.RunnerImages.Go
-	} else if runtime.GenericRuntime != nil && runtime.GenericRuntime.Language != "" {
-		return Configs.RunnerImages.GenericRuntime[runtime.GenericRuntime.Language]
 	}
 	return DefaultRunnerImage
-}
-
-func getSinkRunnerImagePullSecret() []map[string]string {
-	return Configs.RunnerImagePullSecrets
-}
-
-func getSinkRunnerImagePullPolicy() corev1.PullPolicy {
-	return Configs.RunnerImagePullPolicy
 }
 
 func getSinkRunnerImage(spec *v1alpha1.SinkSpec) string {
@@ -2078,14 +1798,6 @@ func getSinkRunnerImage(spec *v1alpha1.SinkSpec) string {
 		return Configs.RunnerImages.Java
 	}
 	return DefaultRunnerImage
-}
-
-func getSourceRunnerImagePullSecret() []map[string]string {
-	return Configs.RunnerImagePullSecrets
-}
-
-func getSourceRunnerImagePullPolicy() corev1.PullPolicy {
-	return Configs.RunnerImagePullPolicy
 }
 
 func getSourceRunnerImage(spec *v1alpha1.SourceSpec) string {
@@ -2147,24 +1859,6 @@ func getDecimalSIMemory(quantity *resource.Quantity) string {
 	return resource.NewQuantity(quantity.Value(), resource.DecimalSI).String()
 }
 
-func getGenericSecretProviderArgs(secretMaps map[string]v1alpha1.SecretRef, language string) []string {
-	var ret []string
-	if len(secretMaps) > 0 {
-		if language == "python" {
-			ret = []string{
-				"--secrets_provider",
-				"secrets_provider.EnvironmentBasedSecretsProvider",
-			}
-		} else if language == "nodejs" {
-			ret = []string{
-				"--secrets_provider",
-				"EnvironmentBasedSecretsProvider",
-			}
-		}
-	}
-	return ret
-}
-
 func getTLSTrustCertPath(tlsVolume TLSConfig, path string) string {
 	return fmt.Sprintf("%s/%s", tlsVolume.GetMountPath(), path)
 }
@@ -2175,7 +1869,7 @@ const (
 	golangRuntimeLog
 )
 
-func GetRuntimeLogConfigNames(java *v1alpha1.JavaRuntime, python *v1alpha1.PythonRuntime,
+func getRuntimeLogConfigNames(java *v1alpha1.JavaRuntime, python *v1alpha1.PythonRuntime,
 	golang *v1alpha1.GoRuntime) map[int32]*v1alpha1.RuntimeLogConfig {
 
 	var configs = map[int32]*v1alpha1.RuntimeLogConfig{}
@@ -2232,7 +1926,6 @@ func CheckIfStatefulSetSpecIsEqual(spec *appsv1.StatefulSetSpec, desiredSpec *ap
 				if !reflect.DeepEqual(container.Command, desiredContainer.Command) ||
 					container.Image != desiredContainer.Image ||
 					container.ImagePullPolicy != desiredContainer.ImagePullPolicy ||
-					!reflect.DeepEqual(container.LivenessProbe, desiredContainer.LivenessProbe) ||
 					!reflect.DeepEqual(ports, desiredPorts) ||
 					!reflect.DeepEqual(containerEnvFrom, desiredContainerEnvFrom) ||
 					!reflect.DeepEqual(container.Resources, desiredContainer.Resources) {
@@ -2414,7 +2107,7 @@ func getSubscriptionNameOrDefault(subscription, tenant, namespace, name string) 
 	return subscription
 }
 
-func makeFilebeatContainer(volumeMounts []corev1.VolumeMount, envVar []corev1.EnvVar, logTopic string,
+func makeFilebeatContainer(volumeMounts []corev1.VolumeMount, envVar []corev1.EnvVar, name string, logTopic string,
 	agent v1alpha1.LogTopicAgent, tlsConfig TLSConfig, authConfig *v1alpha1.AuthConfig,
 	pulsarConfig string, authSecret string, tlsSecret string, image string) *corev1.Container {
 	if logTopic == "" || agent != v1alpha1.SIDECAR {
@@ -2426,7 +2119,7 @@ func makeFilebeatContainer(volumeMounts []corev1.VolumeMount, envVar []corev1.En
 	}
 	imagePullPolicy := corev1.PullIfNotPresent
 	allowPrivilegeEscalation := false
-	mounts := GenerateContainerVolumeMounts(volumeMounts, nil, nil, tlsConfig, authConfig, nil, agent)
+	mounts := generateContainerVolumeMounts(volumeMounts, nil, nil, tlsConfig, authConfig, nil, agent)
 
 	var uid int64 = 1000
 
@@ -2434,8 +2127,8 @@ func makeFilebeatContainer(volumeMounts []corev1.VolumeMount, envVar []corev1.En
 		Name:  "logTopic",
 		Value: logTopic,
 	}, corev1.EnvVar{
-		Name:      "POD_NAME",
-		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}},
+		Name:  "logName",
+		Value: name,
 	})
 
 	if authConfig != nil {
@@ -2509,7 +2202,7 @@ func makeFilebeatContainer(volumeMounts []corev1.VolumeMount, envVar []corev1.En
 		Command:         []string{"/bin/sh", "-c", "--", "echo " + fmt.Sprintf("\"%s\"", tpl.String()) + " > " + DefaultFilebeatConfig + " && /usr/share/filebeat/filebeat -e -c " + DefaultFilebeatConfig},
 		Env:             envs,
 		ImagePullPolicy: imagePullPolicy,
-		EnvFrom:         GenerateContainerEnvFrom(pulsarConfig, authSecret, tlsSecret),
+		EnvFrom:         generateContainerEnvFrom(pulsarConfig, authSecret, tlsSecret),
 		VolumeMounts:    mounts,
 		SecurityContext: &corev1.SecurityContext{
 			Capabilities: &corev1.Capabilities{
@@ -2519,25 +2212,4 @@ func makeFilebeatContainer(volumeMounts []corev1.VolumeMount, envVar []corev1.En
 			RunAsUser:                &uid,
 		},
 	}
-}
-
-func CreateDiff(orj, modified *appsv1.StatefulSet) (string, error) {
-	orjCopy := orj.DeepCopyObject().(*appsv1.StatefulSet)
-	modifiedCopy := modified.DeepCopyObject().(*appsv1.StatefulSet)
-	modifiedCopy.Status = orjCopy.Status
-	modifiedCopy.ObjectMeta = orjCopy.ObjectMeta
-
-	orjData, err := json.Marshal(orjCopy)
-	if err != nil {
-		return "", fmt.Errorf("marshal origin %w", err)
-	}
-	modifiedData, err := json.Marshal(modifiedCopy)
-	if err != nil {
-		return "", fmt.Errorf("marshal modified %w", err)
-	}
-	patch, err := strategicpatch.CreateTwoWayMergePatch(orjData, modifiedData, orjCopy)
-	if err != nil {
-		return "", fmt.Errorf("create diff %w", err)
-	}
-	return string(patch), nil
 }
