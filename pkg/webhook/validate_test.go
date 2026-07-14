@@ -62,6 +62,130 @@ func TestValidateFunctionMessagingRejectsMissingKafkaPlainAuthSecretName(t *test
 	}
 }
 
+func TestValidateFunctionMessagingRejectsMissingKafkaSchemaRegistryURL(t *testing.T) {
+	err := validateFunctionMessaging(&v1alpha1.FunctionSpec{
+		Messaging: v1alpha1.Messaging{
+			Kafka: &v1alpha1.KafkaMessaging{
+				BootstrapServers: "kafka:9092",
+				SchemaRegistry:   &v1alpha1.KafkaSchemaRegistryConfig{},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "kafka.schemaRegistry.url needs to be set") {
+		t.Fatalf("expected missing kafka schema registry url error, got %v", err)
+	}
+}
+
+func TestValidateFunctionMessagingRejectsMissingKafkaSchemaRegistryBasicAuthSecretName(t *testing.T) {
+	err := validateFunctionMessaging(&v1alpha1.FunctionSpec{
+		Messaging: v1alpha1.Messaging{
+			Kafka: &v1alpha1.KafkaMessaging{
+				BootstrapServers: "kafka:9092",
+				SchemaRegistry: &v1alpha1.KafkaSchemaRegistryConfig{
+					URL: "https://schema-registry:8081",
+					AuthConfig: &v1alpha1.KafkaSchemaRegistryAuthConfig{
+						BasicAuthConfig: &v1alpha1.KafkaSchemaRegistryBasicAuthConfig{},
+					},
+				},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "kafka.schemaRegistry.authConfig.basicAuthConfig.secretName needs to be set") {
+		t.Fatalf("expected missing kafka schema registry basic auth secretName error, got %v", err)
+	}
+}
+
+func TestValidateFunctionMessagingRejectsMissingKafkaSchemaRegistryOAuth2RequiredFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*v1alpha1.OAuth2Config)
+		want   string
+	}{
+		{
+			name: "issuer url",
+			mutate: func(config *v1alpha1.OAuth2Config) {
+				config.IssuerURL = ""
+			},
+			want: "kafka.schemaRegistry.authConfig.oauth2Config.issuerUrl needs to be set",
+		},
+		{
+			name: "audience",
+			mutate: func(config *v1alpha1.OAuth2Config) {
+				config.Audience = ""
+			},
+			want: "kafka.schemaRegistry.authConfig.oauth2Config.audience needs to be set",
+		},
+		{
+			name: "key secret name",
+			mutate: func(config *v1alpha1.OAuth2Config) {
+				config.KeySecretName = ""
+			},
+			want: "kafka.schemaRegistry.authConfig.oauth2Config.keySecretName needs to be set",
+		},
+		{
+			name: "key secret key",
+			mutate: func(config *v1alpha1.OAuth2Config) {
+				config.KeySecretKey = ""
+			},
+			want: "kafka.schemaRegistry.authConfig.oauth2Config.keySecretKey needs to be set",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oauth2Config := &v1alpha1.OAuth2Config{
+				Audience:      "schema-registry",
+				IssuerURL:     "https://issuer.example.com",
+				KeySecretName: "sr-oauth",
+				KeySecretKey:  "auth.json",
+			}
+			tt.mutate(oauth2Config)
+
+			err := validateFunctionMessaging(&v1alpha1.FunctionSpec{
+				Messaging: v1alpha1.Messaging{
+					Kafka: &v1alpha1.KafkaMessaging{
+						BootstrapServers: "kafka:9092",
+						SchemaRegistry: &v1alpha1.KafkaSchemaRegistryConfig{
+							URL: "https://schema-registry:8081",
+							AuthConfig: &v1alpha1.KafkaSchemaRegistryAuthConfig{
+								OAuth2Config: oauth2Config,
+							},
+						},
+					},
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestValidateFunctionMessagingRejectsMultipleKafkaSchemaRegistryAuthConfigs(t *testing.T) {
+	err := validateFunctionMessaging(&v1alpha1.FunctionSpec{
+		Messaging: v1alpha1.Messaging{
+			Kafka: &v1alpha1.KafkaMessaging{
+				BootstrapServers: "kafka:9092",
+				SchemaRegistry: &v1alpha1.KafkaSchemaRegistryConfig{
+					URL: "https://schema-registry:8081",
+					AuthConfig: &v1alpha1.KafkaSchemaRegistryAuthConfig{
+						BasicAuthConfig: &v1alpha1.KafkaSchemaRegistryBasicAuthConfig{SecretName: "sr-basic"},
+						OAuth2Config: &v1alpha1.OAuth2Config{
+							Audience:      "schema-registry",
+							IssuerURL:     "https://issuer.example.com",
+							KeySecretName: "sr-oauth",
+							KeySecretKey:  "auth.json",
+						},
+					},
+				},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only one kafka.schemaRegistry auth config can be set") {
+		t.Fatalf("expected multiple kafka schema registry auth configs error, got %v", err)
+	}
+}
+
 func TestValidateFunctionMessagingRejectsKafkaCleanupSubscription(t *testing.T) {
 	err := validateFunctionMessaging(&v1alpha1.FunctionSpec{
 		CleanupSubscription: true,
